@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobilis"
+dynamic = ["version"]
+description = "Charge-transport and photophysics toolkit for organic semiconductors"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "Yarui Shi"}]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20", "scipy>=1.7", "matplotlib>=3.5", "scikit-image>=0.19"]
+
+[project.optional-dependencies]
+adf = ["plams"]
+
+[project.scripts]
+mobilis = "mobility_tool.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/xiaoshentu/Mobilis"
+
+[tool.setuptools]
+packages = ["mobility_tool"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mobility_tool.__version__"}
+
+[tool.setuptools.package-data]
+mobility_tool = ["assets/*"]

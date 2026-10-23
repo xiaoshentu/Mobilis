@@ -1,0 +1,5 @@
+numpy>=1.20
+scipy>=1.7
+matplotlib>=3.5
+scikit-image>=0.19     # 等值面 (轨道 / ESP 表面)
+# 可选: plams  (直接读取 ADF 的 adf.rkf / TAPE21)
