@@ -1,0 +1,25 @@
+ =============================================================================
+ Charge transfer integrals relevant for hole or electron mobility calculations
+ =============================================================================
+  
+ Electronic coupling V (also known as effective (generalized) transfer integrals J_eff)
+ V = (J-S(e1+e2)/2)/(1-S^2)
+
+ V for hole transfer:           0.07727 eV
+ V for electron transfer:      -0.07752 eV
+
+ The effective transfer integral, or electronic coupling, is calculated from these components:
+
+ e1(hole) Site energy HOMO fragment 1:      -4.80096 eV
+ e2(hole) Site energy HOMO fragment 2:      -4.50644 eV
+ J(hole) Charge transfer integral HOMO fragment 1 - HOMO fragment 2:       0.15764 eV
+ S(hole) Overlap integral HOMO fragment 1 - HOMO fragment 2:      -0.01727
+
+ e1(electron) Site energy LUMO fragment 1:      -3.60278 eV
+ e2(electron) Site energy LUMO fragment 2:      -3.21334 eV
+ J(electron) Charge transfer integral LUMO fragment 1 - LUMO fragment 2:      -0.13460 eV
+ S(electron) Overlap integral LUMO fragment 1 - LUMO fragment 2:       0.01675
+
+
+
+ Orbital Energies, per Irrep and Spin:
