@@ -1,10 +1,10 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "Mobilis: a charge-transport and photophysics toolkit for organic semiconductors"
-version: 1.20.2
+version: 1.20.3
 date-released: 2026-10-26
 license: GPL-3.0-or-later
-doi: 10.5281/zenodo.23593489
+doi: 10.5281/zenodo.23593488
 repository-code: "https://github.com/xiaoshentu/Mobilis"
 authors:
   - family-names: Shi

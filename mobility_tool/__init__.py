@@ -54,6 +54,6 @@ from .mobility import compute_mobility, marcus_rate
 from .reorganization import analyze_reorg, generate_reorg_inputs
 from .transfer_integral import calc_transfer_integrals, generate_ti_inputs
 
-__version__ = "1.20.2"
+__version__ = "1.20.3"
 __author__ = "Yarui Shi"
 __affiliation__ = "安阳师范学院 (Anyang Normal University)"
