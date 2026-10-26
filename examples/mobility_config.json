@@ -1,0 +1,11 @@
+{
+  "lambda_eV": 0.18,
+  "temperatures": [298.15],
+  "dimension": 3,
+  "deltaG_eV": 0.0,
+  "pathways": [
+    {"name": "P1", "vector": [4.80, 0.00, 0.00], "J_meV": 55.0, "count": 2},
+    {"name": "P2", "vector": [2.40, 3.30, 0.00], "J_meV": 32.0, "count": 4},
+    {"name": "P3", "vector": [0.00, 0.00, 12.5], "J_meV": 1.5, "count": 2}
+  ]
+}

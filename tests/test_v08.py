@@ -31,7 +31,7 @@ printf "TransferIntegrals\\nV(hole)\\n 1 1 2\\n  -2.679E-02\\nV(electron)\\n 1 1
 
 
 def test_adf2016():
-    if not (shutil.which("bash") or shutil.which("sh")):
+    if not (__import__("mobility_tool.programs").programs.find_shell()):
         print("跳过 (无 sh)")
         return
     from mobility_tool.adf import generate_adf_inputs, read_adf_transfer_integrals, script_style

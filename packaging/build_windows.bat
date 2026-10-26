@@ -7,7 +7,7 @@ rem  需要: Python 3.10-3.12 (64 位)；首次构建会自动下载 C 编译器 (约 10-30 分钟)
 rem ==========================================================================
 cd /d %~dp0..
 set ROOT=%CD%
-set VER=1.16.0
+set VER=1.17.0
 
 where python >nul 2>nul || (echo [错误] 找不到 python，请先安装 Python 3.11 或 3.12 (64 位) 并勾选 Add to PATH & pause & exit /b 1)
 python -c "import sys; sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,12) else 1)" || (

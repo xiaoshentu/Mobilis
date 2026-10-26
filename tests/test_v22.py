@@ -148,7 +148,7 @@ def test_site_energies_export_and_compare():
 
 def test_cli_morph_and_cif2gro():
     d = tempfile.mkdtemp()
-    run = lambda *a: subprocess.run([sys.executable, "-m", "mobility_tool", *a], cwd=ROOT, capture_output=True,  # noqa: E731
+    run = lambda *a: subprocess.run([sys.executable, "-m", "mobility_tool", *a], cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"},  # noqa: E731
                                     text=True, timeout=900)
     g = os.path.join(d, "x.gro")
     p = run("cif2gro", "--cif", CIF, "--supercell", "2,2,1", "--resname", "PEN", "--out", g)

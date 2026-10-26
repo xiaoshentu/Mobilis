@@ -27,7 +27,7 @@ def test_text_encoding():
 
 
 def test_batch():
-    if not (shutil.which("bash") or shutil.which("sh")):
+    if not (__import__("mobility_tool.programs").programs.find_shell()):
         print("跳过 (无 sh)")
         return
     from test_crystal import make_cif

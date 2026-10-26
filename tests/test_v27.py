@@ -17,7 +17,7 @@ REF = os.path.join(ROOT, "tests", "data", "pentacene_ref.xyz")
 
 
 def cli(*args):
-    r = subprocess.run([sys.executable, "-m", "mobility_tool", *args], cwd=ROOT, capture_output=True, text=True,
+    r = subprocess.run([sys.executable, "-m", "mobility_tool", *args], cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}, text=True,
                        timeout=1500)
     assert r.returncode == 0, r.stderr[-3000:] + r.stdout[-2000:]
     return r.stdout
@@ -54,6 +54,22 @@ def test_ceds_al_loop():
     sel = [i for r in run.state["rounds"] for idx in r["selected"].values() for i in idx]
     n_total = len(sel)
     assert n_total <= 2 * (8 + 8 * 8)
+    # 种子：用 al1 各轮已算完的数据启动新的主动学习任务 (换一段 MD 的候选池) → 应直接收敛或只需少量补点
+    seeds = ",".join(r["scan"] for r in run.state["rounds"])
+    c2 = [x if x != "al1" else "al2" for x in common] + ["--al-seed", seeds]
+    out2 = cli(*c2)
+    assert "种子数据" in out2, out2
+    run2 = ALRun(ScanProject(proj_dir), "al2")
+    n2 = sum(len(i) for r in run2.state["rounds"] for i in r["selected"].values())
+    assert n2 <= 2 * 8, (n2, out2)
+    # 种子扫描全部未算完：不阻塞，按常规第 1 轮布点
+    from mobility_tool.scanflow import make_cfg
+    pr2 = ScanProject(proj_dir)
+    pr2.add_scan("empty_seed", [dict(make_cfg(3.6 + 0.05 * i, 0.0, 0.0), set="al", group="1") for i in range(3)],
+                 next(iter(pr2.meta["levels"])), kind="al", reduce=False, clash_min=0.0)
+    c3 = [x if x != "al1" else "al3" for x in common] + ["--al-seed", "empty_seed"]
+    out3 = cli(*c3)
+    assert "第 1 轮 16 个 ADF 任务" in out3, out3
     out = cli("ceds", "md", "--cif", CIF, "--project", proj_dir, "--al-surfaces", "al1", "--temps", "300",
               "--supercell", "3,2,1", "--md-equil", "0.5", "--md-prod", "3", "--sigma-only")
     assert "GP 曲面" in out and "μ" in out

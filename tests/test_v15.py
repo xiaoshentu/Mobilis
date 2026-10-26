@@ -60,9 +60,16 @@ def test_population_density_cube():
         write_cube(f"{d}/h.cube", cube)
         c2 = read_cube(f"{d}/h.cube")
         assert c2["data"].shape == cube["data"].shape and np.abs(c2["data"] - cube["data"]).max() < 1e-4
-        es = esp_surface(wb.density_cube(0.3), None, 0.001, charges=rb["charges"])
-        assert es["extrema"] and es["stats"]["area_A2"] > 50
-    print(f"电荷 / 键级 / 密度 OK: H2 键级 1、密度积分 {n:.4f}；苯电荷和 0；cube 读写一致；ESP 表面 {len(es['extrema'])} 个极值")
+        es = None
+        try:
+            import skimage  # noqa: F401
+        except ImportError:
+            print("跳过 ESP 表面 (未安装 scikit-image：pip install scikit-image)")
+        else:
+            es = esp_surface(wb.density_cube(0.3), None, 0.001, charges=rb["charges"])
+            assert es["extrema"] and es["stats"]["area_A2"] > 50
+    print(f"电荷 / 键级 / 密度 OK: H2 键级 1、密度积分 {n:.4f}；苯电荷和 0；cube 读写一致；"
+          + (f"ESP 表面 {len(es['extrema'])} 个极值" if es else "ESP 表面已跳过"))
 
 
 def test_nbo():

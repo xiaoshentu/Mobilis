@@ -187,7 +187,7 @@ def test_morphology_zindo_and_cli():
         assert abs(abs(r["hole"]) - abs(Jh[k])) < 1e-6 and abs(abs(r["electron"]) - abs(Je[k])) < 1e-6
     assert m.J_source.startswith("ZINDO") and np.abs(Jh).max() > 0.05
     d = tempfile.mkdtemp()
-    run = lambda *a: subprocess.run([sys.executable, "-m", "mobility_tool", *a], cwd=ROOT, capture_output=True,  # noqa: E731
+    run = lambda *a: subprocess.run([sys.executable, "-m", "mobility_tool", *a], cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"},  # noqa: E731
                                     text=True, timeout=900)
     from mobility_tool.gaussian_io import write_xyz
     sym, Y = _pentacene()

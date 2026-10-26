@@ -4,20 +4,25 @@ import numpy as np
 
 from mobility_tool.eht import eht_transfer_integrals, monomer, rotate_coefficients, build_basis
 from mobility_tool.interaction import uff_interaction
-from mobility_tool.surrogate import build_B, rotation
+from mobility_tool.surrogate import MIRROR, build_B, is_mirror, rotation
 
 
 class FakeADF:
     def __init__(self, symbols, Y):
         self.sym, self.Y = list(symbols), np.asarray(Y, float)
         self.mono = monomer(self.sym, self.Y)
+        self._mono_m = None
         self.A = [(s, *p) for s, p in zip(self.sym, self.Y)]
 
     def results(self, c):
         R = rotation(c["gamma"], c["roll"], c["pitch"])
-        B = build_B(self.Y, c["z"], c["dx"], c["dy"], c["gamma"], c["roll"], c["pitch"])
+        m = is_mirror(c)
+        B = build_B(self.Y, c["z"], c["dx"], c["dy"], c["gamma"], c["roll"], c["pitch"], mirror=m)
+        if m and self._mono_m is None:
+            self._mono_m = monomer(self.sym, self.Y * MIRROR)
+        mo = self._mono_m if m else self.mono
         shells, _, _ = build_basis(self.sym, B)
-        mb = dict(self.mono, shells=shells, C=rotate_coefficients(self.mono["shells"], self.mono["C"], R))
+        mb = dict(mo, shells=shells, C=rotate_coefficients(mo["shells"], mo["C"], R))
         Bat = [(s, *p) for s, p in zip(self.sym, B)]
         r = eht_transfer_integrals(self.A, Bat, esd=False, _mono_b=mb)["results"]
         e = uff_interaction(self.A, Bat)["total"] / 4.184

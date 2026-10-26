@@ -147,7 +147,7 @@ def test_compare_polar_and_md_sigma():
 def test_cli_polar():
     d = tempfile.mkdtemp()
     run = lambda *a: subprocess.run([sys.executable, "-m", "mobility_tool", "polar", "--cif", CIF, *a], cwd=ROOT,  # noqa: E731
-                                    capture_output=True, text=True, timeout=600)
+                                    capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}, text=True, timeout=600)
     p = run("--gjf", os.path.join(d, "pent"))
     assert p.returncode == 0, p.stderr
     txt = open(os.path.join(d, "pent_neutral.gjf")).read()

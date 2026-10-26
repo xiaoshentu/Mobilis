@@ -80,7 +80,7 @@ def test_programs():
     assert r["pairs"][("HOMO", "HOMO")] == 0.113 and r["total"]["electron"] == 0.062 and r["normal"]
     import shutil
     import threading
-    if shutil.which("bash") or shutil.which("sh"):
+    if __import__("mobility_tool.programs").programs.find_shell():
         from mobility_tool.adf import generate_adf_inputs
         from mobility_tool.jobs import JobQueue
         from mobility_tool.programs import find_ams

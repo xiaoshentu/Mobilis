@@ -1,6 +1,6 @@
 ﻿; Mobilis 迁跃 安装包 (Inno Setup 6)。由 build_windows.bat 调用，也可在 Inno Setup 中直接打开编译。
 #ifndef MyAppVersion
-  #define MyAppVersion "1.16.0"
+  #define MyAppVersion "1.17.0"
 #endif
 #define MyAppName "Mobilis"
 #define MyAppExe "Mobilis.exe"

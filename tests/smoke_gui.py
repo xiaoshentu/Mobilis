@@ -109,6 +109,7 @@ sys.modules["matplotlib.backends.backend_tkagg"] = bk
 _use = matplotlib.use; matplotlib.use = lambda *a, **k: None
 
 from mobility_tool import gui
+gui.CONFIG = Path(tempfile.mkdtemp()) / "config.json"      # 不改动用户自己的设置 (最近文件等)
 from test_crystal import make_cif
 from test_decomposition import write_freq_fchk, model_hessian
 from test_all import write_fchk, fake_log
@@ -171,7 +172,7 @@ st.mtree._sel = st.mtree.get_children()[3:4]; st.on_tree_select(); assert st.sel
 for sty in ("棍状", "空间填充", "线框", "球棍"):
     st.style_var.set(sty); st.redraw()
 st.bg_var.set("白色"); st.persp.set(False); st.redraw(); st.view_along(0); st.view_along("z")
-pick(tmp / "struct.png"); st.save_image(); assert (tmp / "struct.png").exists(); st.bg_var.set("深蓝渐变 (MedeA 风格)")
+pick(tmp / "struct.png"); st.save_image(); assert (tmp / "struct.png").exists(); st.bg_var.set("深蓝渐变")
 check("四种显示样式 / 背景 / 沿 a、z 观察 / 保存高清图片")
 pick(ROOT / "examples/benzene.xyz"); app.struct_tab.open_file(); check("打开 xyz 分子")
 
@@ -303,9 +304,9 @@ ip = app.ipea_tab; ip.orbfile.set(tmp/"ir.fchk"); ip.auto_frag(); assert "Metal(
 ip.comp_method.set("Mulliken"); ip.comp(); assert "HOMO" in ip.text.buf; check("轨道片段组成 (自动划分 Ir / 配体, Mulliken)")
 # 运行窗口 (假高斯)
 import shutil as _sh
-fake = tmp / "fakebin"; fake.mkdir()
-for f_ in ("g16", "formchk"): _sh.copy(f"/tmp/fakeg/bin/{f_}", fake / f_)
-rd = gui.RunDialog(app, str(tmp/"exc")); rd.exe.set(fake / "g16"); rd.load()
+from fake_programs import fake_gaussian
+fake_exe = fake_gaussian(tmp / "fakebin")              # Windows 下为 g16.bat (调用当前 Python)
+rd = gui.RunDialog(app, str(tmp/"exc")); rd.exe.set(fake_exe); rd.load()
 rd.tree._sel = rd.tree.get_children(); rd.run(); rd.queue.thread.join(30); rd.poll()
 assert "成功 3 / 3" in rd.log.buf, rd.log.buf; check("运行窗口用（假）高斯依次运行 S0→S1→T1 并 formchk")
 # ---- EHT、三种方法对比、应变、KMC
@@ -332,13 +333,23 @@ ti.prog.set("gaussian")
 
 # ---- 程序路径 / ADF 运行 / xtb / 扩展页 / 菜单
 app.config_data.update({"ams_home": "/tmp/fakeams"})
-pd = gui.ProgramsDialog(app); pd.detect_all(); assert pd.entries["ams_home"].get() == "/tmp/fakeams" and "xtb_exe" not in pd.entries
+import os as _os
+def _same_path(a, b):        # Windows: "/tmp/fakeams" 与 "C:\\tmp\\fakeams" 是同一目录
+    return _os.path.normcase(_os.path.abspath(str(a))) == _os.path.normcase(_os.path.abspath(str(b)))
+pd = gui.ProgramsDialog(app); pd.detect_all()
+assert _same_path(pd.entries["ams_home"].get(), "/tmp/fakeams"), pd.entries["ams_home"].get()
+assert "xtb_exe" not in pd.entries
 pd.nscm.set("4"); pd.save(); assert app.config_data["adf_nscm"] == "4"
 check("程序路径设置 (检测 AMS；ADF 并行核数；已移除 xtb)")
 ti.prog.set("adf"); ti.a_style.set("AMS2020+"); ti.outdir.set(tmp / "adfjobs"); ti.dimer.set(tmp / "pair.xyz"); ti.na.set("12"); ti.generate()
 rd2 = gui.RunDialog(app, str(tmp / "adfjobs")); rd2.load(); assert any(i.endswith(".sh") for i in rd2.tree.get_children())
-rd2.tree._sel = rd2.tree.get_children(); rd2.run(); rd2.queue.thread.join(30); rd2.poll()
-assert "成功 1 / 1" in rd2.log.buf, rd2.log.buf; check("运行窗口执行 ADF 任务 (AMS 环境变量 + 片段顺序)")
+from mobility_tool.programs import find_shell as _find_shell
+HAVE_SH = not sys.platform.startswith("win") or bool(_find_shell())   # 模拟 ADF 是 sh 脚本：Windows 上需要 Git for Windows 的 bash
+if not HAVE_SH:
+    print("  [跳过] 本机没有 bash (Git for Windows)，不运行模拟 ADF 脚本 (以下几项同样跳过)")
+else:
+    rd2.tree._sel = rd2.tree.get_children(); rd2.run(); rd2.queue.thread.join(30); rd2.poll()
+    assert "成功 1 / 1" in rd2.log.buf, rd2.log.buf; check("运行窗口执行 ADF 任务 (AMS 环境变量 + 片段顺序)")
 ti.cmp_dir.set(gdir); ti.compare(); assert "xtb" not in ti.text.buf.split("\n")[0]; check("方法对比 (EHT / Gaussian / ADF，不含 xtb)")
 adv = app.adv_tab
 sx.cut.set("4.5"); sx.eht_all(); adv.dn.set("6"); adv.run_dyn(); assert "σh/|J|" in adv.text.buf; check("动态无序 σ_J (EHT 采样)")
@@ -369,10 +380,11 @@ generate_adf_inputs(tmp / "adf2016", dimer=tmp / "pair.xyz", n_a=12, name="old",
 rd3 = gui.RunDialog(app, str(tmp / "adf2016")); rd3.ams.set("/tmp/fake2016"); rd3.detect_ams(); rd3.load()
 names = [Path(i).name for i in rd3.tree.get_children()]
 assert "run_all_adf.sh" not in names and len(names) == 2, names; check("运行窗口列出 ADF 任务 (排除 run_all)")
-rd3.test_ams(); assert "ADF 环境正常" in rd3.log.buf; check("测试 ADF 环境 (H2 单点)")
-rd3.tree._sel = rd3.tree.get_children(); rd3.run(); rd3.queue.thread.join(30); rd3.poll()
-assert "成功 2 / 2" in rd3.log.buf, rd3.log.buf; check("ADF2016 运行两个任务 (AMS 格式脚本自动转换为旧版)")
-ti.adf_file.set(tmp / "adf2016" / "dimer_full.t21"); ti.calc(); assert "hole" in ti.text.buf; check("读取 ADF2016 TAPE21 结果 (无需 PLAMS)")
+if HAVE_SH:
+    rd3.test_ams(); assert "ADF 环境正常" in rd3.log.buf; check("测试 ADF 环境 (H2 单点)")
+    rd3.tree._sel = rd3.tree.get_children(); rd3.run(); rd3.queue.thread.join(30); rd3.poll()
+    assert "成功 2 / 2" in rd3.log.buf, rd3.log.buf; check("ADF2016 运行两个任务 (AMS 格式脚本自动转换为旧版)")
+    ti.adf_file.set(tmp / "adf2016" / "dimer_full.t21"); ti.calc(); assert "hole" in ti.text.buf; check("读取 ADF2016 TAPE21 结果 (无需 PLAMS)")
 ti.prog.set("gaussian")
 
 # ---- 选择 adf 程序文件 / .run 文件
@@ -397,19 +409,20 @@ assert (tmp / "batchdir" / "batch_adf.run").exists() and (tmp / "batchdir" / "ba
 assert (tmp / "batchdir" / "batch_adf.run").read_bytes().decode("gbk"); check("导出全部二聚体 → 一个 batch_adf.run (GBK, ADFjobs 可直接运行)")
 ti.text.delete("1.0", "end"); ti.outdir.set(tmp / "adf_gbk"); ti.dimer.set(tmp / "pair.xyz"); ti.na.set("12"); ti.generate()
 assert "ADF" in ti.text.buf; check("显示 UTF-8 脚本内容不再出现 gbk 解码错误")
-rd4 = gui.RunDialog(app, str(tmp / "batchdir")); rd4.ams.set("/tmp/fake2016"); rd4.detect_ams(); rd4.load()
-kids = list(rd4.tree.get_children()); assert any(k.endswith("batch_adf.sh") for k in kids), kids
-app.mob_tab.set_paths([]); rd4.tree._sel = [k for k in kids if k.endswith("batch_adf.sh")]; rd4.run(); rd4.queue.thread.join(60); rd4.poll()
-assert "已自动读取" in rd4.log.buf, rd4.log.buf
-rows = app.mob_tab.tree.rows(); assert rows and all(r[-1] not in ("", None) for r in rows[:1]), rows[:2]
-check(f"运行 batch_adf.sh 一次算完 → 自动读取并填入迁移率表 ({len(rows)} 个近邻)")
-pick(tmp / "batchdir2"); sx.export()
-from mobility_tool.programs import run_adf_script, find_ams as _fa
-rd5 = gui.RunDialog(app, str(tmp / "batchdir2")); rd5.ams.set("/tmp/fake2016"); rd5.detect_ams()
-rd5._watching = True; assert rd5.watch_step() is False                      # 尚未计算
-run_adf_script(_fa("/tmp/fake2016"), tmp / "batchdir2" / "batch_adf.sh")   # 模拟在 ADFjobs 中运行完毕
-rd5._watching = True; assert rd5.watch_step() is True and "已自动读取" in rd5.log.buf
-check("监视 ADFjobs：计算完成后自动读取")
+if HAVE_SH:
+    rd4 = gui.RunDialog(app, str(tmp / "batchdir")); rd4.ams.set("/tmp/fake2016"); rd4.detect_ams(); rd4.load()
+    kids = list(rd4.tree.get_children()); assert any(k.endswith("batch_adf.sh") for k in kids), kids
+    app.mob_tab.set_paths([]); rd4.tree._sel = [k for k in kids if k.endswith("batch_adf.sh")]; rd4.run(); rd4.queue.thread.join(60); rd4.poll()
+    assert "已自动读取" in rd4.log.buf, rd4.log.buf
+    rows = app.mob_tab.tree.rows(); assert rows and all(r[-1] not in ("", None) for r in rows[:1]), rows[:2]
+    check(f"运行 batch_adf.sh 一次算完 → 自动读取并填入迁移率表 ({len(rows)} 个近邻)")
+    pick(tmp / "batchdir2"); sx.export()
+    from mobility_tool.programs import run_adf_script, find_ams as _fa
+    rd5 = gui.RunDialog(app, str(tmp / "batchdir2")); rd5.ams.set("/tmp/fake2016"); rd5.detect_ams()
+    rd5._watching = True; assert rd5.watch_step() is False                      # 尚未计算
+    run_adf_script(_fa("/tmp/fake2016"), tmp / "batchdir2" / "batch_adf.sh")   # 模拟在 ADFjobs 中运行完毕
+    rd5._watching = True; assert rd5.watch_step() is True and "已自动读取" in rd5.log.buf
+    check("监视 ADFjobs：计算完成后自动读取")
 ti.prog.set("gaussian")
 
 for f in gdir.glob("G*_A.gjf"):

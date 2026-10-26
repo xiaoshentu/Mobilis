@@ -79,7 +79,7 @@ def test_figure_html_and_cli():
         for p in PATHS))
     p = subprocess.run([sys.executable, "-m", "mobility_tool", "mobility3d", str(csv), "--lam-e", "0.13", "--lam-h", "0.09",
                         "--scale", "1000", "--cif", os.path.join(ROOT, "tests/data/pentacene_RT.cif"),
-                        "--plot", f"{d}/cli.png"], cwd=ROOT, capture_output=True, text=True, timeout=300)
+                        "--plot", f"{d}/cli.png"], cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}, text=True, timeout=300)
     assert p.returncode == 0, p.stderr
     assert "μ1" in p.stdout and os.path.exists(f"{d}/cli.png") and os.path.exists(f"{d}/cli.html")
 
