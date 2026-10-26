@@ -486,6 +486,9 @@ def cmd_scan(a):
         if a.import_t21:
             pr.import_fragment(lv, a.import_t21)
         print(f"层级 {lv}: {pr.level_dir(lv) / 'mono.run'}" + ("" if pr.t21(lv).exists() else "  (请先运行，生成 mono.t21)"))
+        if a.mirror:
+            pm = pr._write_mono_job(lv, mirror=True)
+            print(f"镜像单体 (对映体分子)：{pm}" + ("" if pr.t21(lv, mirror=True).exists() else "  (请先运行，生成 mono_m.t21)"))
     elif act == "grid":
         info = pr.add_scan(a.name, grid_configs({"z": a.z, "dx": a.dx, "dy": a.dy, "gamma": a.gamma, "pitch": a.pitch,
                                                  "roll": a.roll}), lv, clash_min=a.clash, chunk=a.chunk,
@@ -588,7 +591,8 @@ def cmd_ceds(a):
         if a.md_half:
             from .rigidmd import RigidCrystalMD, load_frames, md_half, run_temperature
             sc = tuple(int(x) for x in a.supercell.replace(",", " ").split())
-            md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0)
+            md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0,
+                                charges=_md_charges(a, mono or (proj.symbols, proj.Y)))
             if a.traj:
                 fr = load_frames(a.traj)
             else:
@@ -643,8 +647,8 @@ def cmd_ceds(a):
         if a.action == "md" and len(surf) < len([p for p in ce.pairs if p["r_centroid"] < 7.0]):
             print("[提示] 部分近邻二聚体没有曲面，TLT 只包含有曲面的键 (μ 偏低或方向不完整)；σ_V 不受影响")
     elif a.source == "eht" or not proj:
-        s_ = EHTSurface(ce.sym, ce.Y)
-        surf = {p["gid"]: s_ for p in ce.pairs}
+        s_ = {m: EHTSurface(ce.sym, ce.Y, mirror=m) for m in (False, True)}
+        surf = {p["gid"]: s_[bool(p.get("mirror"))] for p in ce.pairs}
     else:
         surf, why = surfaces_from_project(proj, ce, level=a.level, eht_fallback=a.eht_fallback)
         for g, w in why.items():
@@ -932,6 +936,20 @@ def _read_monomer(path, frame="all"):
     return sym, Y
 
 
+def _md_charges(a, monomer):
+    """--md-charges：Gaussian 输出中的原子电荷 (ESP 优先)，按单体原子顺序；未给出时返回 None (用默认力场电荷)。"""
+    path = getattr(a, "md_charges", None)
+    if not path:
+        return None
+    from .polar import charges_from_log
+    sym, Y = monomer
+    q, kind, rmsd = charges_from_log(sym, Y, path)
+    print(f"MD 原子电荷：{Path(path).name} 的 {kind} 电荷 ({len(q)} 个原子，与单体对应 RMSD {rmsd:.2f} Å)", flush=True)
+    if rmsd > 0.3:
+        print("  [注意] 电荷文件的几何与单体差别较大，请确认是同一分子", flush=True)
+    return q
+
+
 def _md_pairs(a, ce):
     if a.pairs.strip():
         if a.pairs.strip().lower() == "parallel":
@@ -948,7 +966,8 @@ def _ceds_snapshots(a, ce, proj, temps, mono):
     if mono is not None and sorted(mono[0]) == sorted(proj.symbols) and not np.allclose(np.asarray(mono[1]), proj.Y):
         print("[提示] --monomer 与扫描项目的单体不同；构型按项目单体生成，MD 用 --monomer 的单体")
     sc = tuple(int(x) for x in a.supercell.replace(",", " ").split())
-    md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0)
+    md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0,
+                                charges=_md_charges(a, mono or (proj.symbols, proj.Y)))
     T = temps[-1]
     if a.traj:
         fr = load_frames(a.traj)
@@ -985,7 +1004,8 @@ def _ceds_al(a, ce, proj, temps, mono):
     if not run.exists:
         from .rigidmd import RigidCrystalMD, load_frames, run_temperature, snapshot_configs
         sc = tuple(int(x) for x in a.supercell.replace(",", " ").split())
-        md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0)
+        md = RigidCrystalMD(ce.crys, ce.frames, mono or (proj.symbols, proj.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0,
+                                charges=_md_charges(a, mono or (proj.symbols, proj.Y)))
         T = temps[-1]
         if a.traj:
             fr = load_frames(a.traj)
@@ -999,16 +1019,41 @@ def _ceds_al(a, ce, proj, temps, mono):
         gids = _md_pairs(a, ce)
         cfgs = snapshot_configs(ce, md, fr, gids, n_per_pair=a.al_pool)
         lv = a.level or next(iter(proj.meta["levels"]))
+        seeds = [x for x in (a.al_seed or "").replace(",", " ").split() if x]
+        for sname in seeds:
+            if sname not in proj.meta.get("scans", {}):
+                raise SystemExit(f"种子扫描 {sname} 不在项目中 (已有: {', '.join(proj.meta.get('scans', {})) or '无'})")
         info = run.start(ce, cfgs, lv, T, init=a.al_init, batch=a.al_batch, target=a.al_target,
-                         info={"supercell": list(sc), "n_frames": int(len(fr["c"]))})
+                         info={"supercell": list(sc), "n_frames": int(len(fr["c"]))}, seeds=seeds, abs_floor=a.al_abs,
+                         delta=a.al_delta != "off")
         print(f"主动学习 {a.name}：{len(gids)} 个近邻对，候选池每对 {a.al_pool} 个 MD 构型；"
-              f"第 1 轮 {info['n']} 个 ADF 任务 → 扫描 {info['scan']}，批处理 {', '.join(info['batches'])}")
+              + ("Δ-学习 (EHT 基线 + GP)" if run.delta else "GP (常数均值)"))
+        if "seeded" in info:
+            print("种子数据 (已算完的构型): " + ", ".join(f"G{g} {n} 个" for g, n in sorted(info["seeded"].items())) + "\n")
+            print(al_report(info["rows"]))
+            if not info["scan"]:
+                print("\n种子数据已足够，全部近邻对已收敛。用这些曲面计算 μ(T)：")
+                print(f"  python -m mobility_tool ceds md --cif {a.cif} --project {a.project} --al-surfaces {a.name}")
+                return
+        print(f"第 1 轮 {info['n']} 个 ADF 任务 → 扫描 {info['scan']}，批处理 {', '.join(info['batches'])}")
         print("在 ADFjobs 中运行这些批处理；算完后再次运行同一条命令，软件会拟合并给出下一轮 (或报告收敛)")
         return
+    if a.al_delta in ("on", "off") and run.delta != (a.al_delta == "on"):
+        run.set_delta(a.al_delta == "on")
+        print(f"已{'开启' if run.delta else '关闭'} Δ-学习 (EHT 基线)；已算的 DFT 数据全部保留，从这一轮起按新曲面拟合与选点\n")
     try:
         rows, new = run.step(ce, force=a.force)
     except ValueError as e:
         raise SystemExit(str(e))
+    if run.delta:
+        chk = run.baseline_check(run.records()[0])
+        if chk:
+            print("EHT 基线与已算 DFT 的相关性：" + "；".join(
+                f"G{g} " + "/".join(f"{v['r']:.2f}" for v in cc.values()) for g, cc in sorted(chk.items())))
+            bad = [g for g, cc in chk.items() if any(v["r"] < 0.8 for v in cc.values())]
+            if bad:
+                print(f"[提示] {', '.join(f'G{g}' for g in bad)} 的 EHT 基线相关性低 (r < 0.8)，Δ-学习的优势会变小；"
+                      "曲面仍然正确 (GP 学习全部差值)，必要时可用 --al-delta off 对比")
     print(f"主动学习 {a.name}：第 {len(run.state['rounds']) - (1 if new else 0)} 轮结果 "
           f"(收敛判据：σ_V 的 95% 区间半宽 ≤ {100 * run.state['target']:.0f}%)\n")
     print(al_report(rows))
@@ -1016,7 +1061,15 @@ def _ceds_al(a, ce, proj, temps, mono):
         print(f"\n下一轮：{new['n']} 个 ADF 任务 → 扫描 {new['scan']}，批处理 {', '.join(new['batches'])}")
     else:
         n = sum(r["n"] for r in rows)
-        print(f"\n全部近邻对已收敛，共 {n} 个 DFT 计算。用这些曲面计算 μ(T)：")
+        print(f"\n全部近邻对已收敛，共 {n} 个 DFT 计算。")
+        if a.al_mu_draws > 0:
+            print(f"耦合曲面不确定度 → TLT 迁移率 ({run.state['T']:g} K, ħ/τ = {a.htau:g} meV, "
+                  f"{a.al_mu_draws} 次后验抽样) …", flush=True)
+            ci = run.mu_ci(ce, hbar_tau=a.htau / 1000.0, n_draws=a.al_mu_draws)
+            for c, v in ci.items():
+                print(f"  {'空穴' if c == 'hole' else '电子'} μ = {v['mu']:.3g} cm²/Vs  (95% 区间 {v['lo']:.3g} – {v['hi']:.3g}，"
+                      f"仅含耦合曲面误差)")
+        print("用这些曲面计算 μ(T)：")
         print(f"  python -m mobility_tool ceds md --cif {a.cif} --project {a.project} --al-surfaces {a.name}")
 
 
@@ -1053,7 +1106,8 @@ def _ceds_md(a, ce, surf, temps, mono):
     from .rigidmd import (DEFAULTS, RigidCrystalMD, export_md_csv, md_summary, md_temperature_series,
                           plot_md_mu_T)
     sc = tuple(int(x) for x in a.supercell.replace(",", " ").split())
-    md = RigidCrystalMD(ce.crys, ce.frames, mono or (ce.sym, ce.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0)
+    md = RigidCrystalMD(ce.crys, ce.frames, mono or (ce.sym, ce.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0,
+                                charges=_md_charges(a, mono or (ce.sym, ce.Y)))
     n_steps = (a.md_equil + a.md_prod) * 1000 / a.md_dt
     print(f"全晶体刚体 MD：超胞 {'×'.join(map(str, sc))} = {md.N} 个分子，{md.n_pairs} 个原子对；{md.ff_note}")
     print(f"  晶格能 (实验结构) {md.lattice_energy():.2f} kcal/mol 每分子；每个温度 {a.md_equil:g} ps 平衡 + "
@@ -1343,6 +1397,8 @@ def main(argv=None):
     q = ss.add_parser("level", help="添加计算层级 (生成 mono.run)")
     q.add_argument("project"); q.add_argument("--xc", default="PW91"); q.add_argument("--basis", default="TZP")
     q.add_argument("--d3", action="store_true"); q.add_argument("--import-t21", default="")
+    q.add_argument("--mirror", action="store_true",
+                   help="同时生成镜像单体的片段计算 mono_m.run (手性分子的中心对称晶体，如 Alq3、Ir 配合物)")
     for nm, hp in (("grid", "参数网格 (z / Δx / Δy / γ / θ / φ，写法 起:止:步 或 a,b,c)"), ("valid", "随机验证集 (拉丁超立方)"),
                    ("check", "对称等价检验")):
         q = ss.add_parser(nm, help=hp)
@@ -1417,6 +1473,8 @@ def main(argv=None):
     p.add_argument("--out", default="", help="结果 CSV (md 时另存同名 .png)")
     g = p.add_argument_group("md (全晶体刚体 MD)")
     g.add_argument("--supercell", default="4,3,2", help="超胞 na,nb,nc")
+    g.add_argument("--md-charges", default=None,
+                   help="MD 静电用的原子电荷：Gaussian 输出 (pop=mk 的 ESP 电荷优先)；含 N/O/金属的分子建议给出")
     g.add_argument("--md-equil", type=float, default=5.0, help="每个温度的平衡时间 / ps")
     g.add_argument("--md-prod", type=float, default=30.0, help="每个温度的采样时间 / ps")
     g.add_argument("--md-dt", type=float, default=5.0, help="时间步长 / fs")
@@ -1431,9 +1489,19 @@ def main(argv=None):
     g.add_argument("--md-k", type=float, default=3.0, help="local --md-half：范围取 ±k·σ_MD")
     g = p.add_argument_group("al (主动学习耦合曲面)")
     g.add_argument("--al-init", type=int, default=12, help="第 1 轮每个近邻对的构型数")
+    g.add_argument("--al-abs", type=float, default=0.3,
+                   help="收敛的绝对下限 / meV：σ_V 区间半宽小于它也算收敛 (弱耦合二聚体)")
+    g.add_argument("--al-seed", default=None,
+                   help="已有扫描 (逗号分隔) 中算完的构型作为初始训练数据，例如先前的局部扫描 rub_local；"
+                        "只在第一次运行时读取设置，之后每轮自动包含")
     g.add_argument("--al-batch", type=int, default=10, help="之后每轮每个未收敛近邻对的构型数")
     g.add_argument("--al-target", type=float, default=0.03, help="收敛判据：σ_V 的相对不确定度 (95%% 区间半宽)")
     g.add_argument("--al-pool", type=int, default=600, help="候选池：每个近邻对从 MD 中取多少个构型")
+    g.add_argument("--al-delta", choices=["auto", "on", "off"], default="auto",
+                   help="Δ-学习：GP 均值取 β₀ + β₁·V_EHT，只学习 DFT 与 EHT 之差 (新任务默认开启；已有任务保持原设置，"
+                        "on / off 可切换)")
+    g.add_argument("--al-mu-draws", type=int, default=30,
+                   help="收敛后把曲面不确定度传递到 TLT 迁移率的后验抽样次数 (0 = 不计算)")
     g.add_argument("--al-surfaces", default="", help="run / md：用这个主动学习任务拟合的 GP 曲面 (覆盖其它来源)")
     g.add_argument("--force", action="store_true", help="al：上一轮还有未完成的构型时也继续")
     p.set_defaults(func=cmd_ceds)

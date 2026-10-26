@@ -82,11 +82,11 @@ def angular_mobility(tensor, plane="xy", n=361):
         axes = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}
         u, v = (np.array(axes[c], float) for c in plane)
     else:
-        u = np.asarray(plane[0], float)
-        u /= np.linalg.norm(u)
-        v = np.asarray(plane[1], float)
+        u = np.array(plane[0], float)          # 复制：传入的可能是晶格矢量，不能原地归一化
+        u = u / np.linalg.norm(u)
+        v = np.array(plane[1], float)
         v = v - (v @ u) * u
-        v /= np.linalg.norm(v)
+        v = v / np.linalg.norm(v)
     theta = np.linspace(0, 2 * np.pi, n)
     d = np.outer(np.cos(theta), u) + np.outer(np.sin(theta), v)
     return theta, np.einsum("ij,jk,ik->i", d, t, d)
@@ -104,11 +104,11 @@ def plane_angles(vector, plane="xy"):
         axes = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}
         u, v = (np.array(axes[c], float) for c in plane)
     else:
-        u = np.asarray(plane[0], float)
-        u /= np.linalg.norm(u)
-        v = np.asarray(plane[1], float)
+        u = np.array(plane[0], float)          # 复制：传入的可能是晶格矢量，不能原地归一化
+        u = u / np.linalg.norm(u)
+        v = np.array(plane[1], float)
         v = v - (v @ u) * u
-        v /= np.linalg.norm(v)
+        v = v / np.linalg.norm(v)
     r = float(np.linalg.norm(vec))
     pu, pv = vec @ u, vec @ v
     inplane = np.hypot(pu, pv)

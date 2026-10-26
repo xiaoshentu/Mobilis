@@ -1,4 +1,4 @@
-"""分子 / 晶体渲染器（MedeA / VESTA 风格）。
+"""分子 / 晶体渲染器（球棍模型，带明暗与高光）。
 
 不使用 matplotlib 的 3D 坐标轴，而是自行投影：球体由多层圆盘叠出明暗与高光，键为两色圆柱并带高光条，
 所有图元按深度排序后放进一个 PolyCollection（画家算法），支持透视、多种显示样式、背景与 a/b/c 坐标指示。
@@ -19,7 +19,7 @@ JMOL = {"H": "#FFFFFF", "He": "#D9FFFF", "Li": "#CC80FF", "B": "#FFB5B5", "C": "
 VDW = {"H": 1.20, "B": 1.92, "C": 1.70, "N": 1.55, "O": 1.52, "F": 1.47, "Si": 2.10, "P": 1.80, "S": 1.80,
        "Cl": 1.75, "Se": 1.90, "Br": 1.85, "I": 1.98, "Ir": 2.00, "Pt": 1.75, "Cu": 1.40, "Zn": 1.39, "Au": 1.66}
 STYLES = {"球棍": "ballstick", "棍状": "stick", "空间填充": "spacefill", "线框": "wireframe"}
-BACKGROUNDS = {"深蓝渐变 (MedeA 风格)": ("#091428", "#2E4468"), "白色": ("#FFFFFF", "#FFFFFF"),
+BACKGROUNDS = {"深蓝渐变": ("#091428", "#2E4468"), "白色": ("#FFFFFF", "#FFFFFF"),
                "浅灰渐变": ("#FFFFFF", "#D5DBE5"), "黑色": ("#000000", "#000000")}
 _CIRC = np.stack([np.cos(np.linspace(0, 2 * np.pi, 20, endpoint=False)),
                   np.sin(np.linspace(0, 2 * np.pi, 20, endpoint=False))], 1)
@@ -37,6 +37,20 @@ def _shade(rgb, how, k, bg=None):
     if how == "white":
         return rgb + (1 - rgb) * k
     return rgb * 0.92
+
+
+def _gradient(ax, top, bottom, n=96):
+    """竖直渐变背景：n 条水平色带组成的多边形集合 (比整幅图像重采样快一个数量级，肉眼看不出分级)。"""
+    t, b = np.array(to_rgb(top)), np.array(to_rgb(bottom))
+    y = np.linspace(0, 1, n + 1)
+    quads = np.stack([np.stack([np.zeros(n), y[:-1]], 1), np.stack([np.ones(n), y[:-1]], 1),
+                      np.stack([np.ones(n), y[1:]], 1), np.stack([np.zeros(n), y[1:]], 1)], 1)
+    f = (y[:-1] + y[1:]) / 2
+    cols = b[None] + f[:, None] * (t - b)[None]
+    pc = PolyCollection(quads, facecolors=cols, edgecolors=cols, linewidths=0.6, antialiaseds=False,
+                        transform=ax.transAxes, zorder=-10)
+    ax.add_collection(pc)
+    return pc
 
 
 def _circle(nv):
@@ -59,7 +73,7 @@ class MolRenderer:
         self.zoom = 1.0
         self.pan = np.zeros(2)
         self.style = "ballstick"
-        self.background = "深蓝渐变 (MedeA 风格)"
+        self.background = "深蓝渐变"
         self.perspective = True
         self.labels = False
         self.show_h = True
@@ -134,13 +148,14 @@ class MolRenderer:
 
     def view_along(self, vec, up=None):
         """沿某方向观察 (vec 指向观察者)。"""
-        z = np.asarray(vec, float)
-        z /= np.linalg.norm(z)
-        up = np.array([0, 0, 1.0]) if up is None else np.asarray(up, float)
-        if abs(up @ z) > 0.95:
-            up = np.array([0, 1.0, 0])
+        z = np.array(vec, float)            # 复制：传入的可能是晶格矢量本身，不能原地归一化
+        z = z / np.linalg.norm(z)
+        up = np.array([0, 0, 1.0]) if up is None else np.array(up, float)
+        up = up / max(np.linalg.norm(up), 1e-12)
+        if abs(up @ z) > 0.95:                       # 向上方向与视线平行：换一个参考方向
+            up = np.array([0, 1.0, 0]) if abs(z[1]) < 0.95 else np.array([1.0, 0, 0])
         x = np.cross(up, z)
-        x /= np.linalg.norm(x)
+        x = x / np.linalg.norm(x)
         y = np.cross(z, x)
         self.R = np.array([x, y, z])
         self.zoom, self.pan = 1.0, np.zeros(2)
@@ -176,9 +191,77 @@ class MolRenderer:
             return np.array([to_rgb(c) for c in self.colors])
         return np.array([to_rgb(JMOL.get(e, "#FF1493")) for e in self.symbols])
 
+    # ---------------- 拖动时的快速预览 ----------------
+    def draw_preview(self):
+        """旋转 / 平移时的轻量绘制：原子为圆形标记 (一个散点集合)、键为线段集合，只更新数据不新建图元；
+        比完整绘制快约 10 倍。松开鼠标后调用 draw() 恢复完整的光照效果。"""
+        from matplotlib.collections import LineCollection
+        ax = self.ax
+        pv = getattr(self, "_preview", None)
+        if pv is None:
+            for a in self._artists:
+                try:
+                    a.remove()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._artists = []
+            top, bottom = BACKGROUNDS.get(self.background, ("#FFFFFF", "#FFFFFF"))
+            bg = _gradient(ax, top, bottom)
+            lc = LineCollection([], zorder=1, capstyle="round")
+            ax.add_collection(lc)
+            sc_ = ax.scatter([], [], s=[], zorder=2, linewidths=0)
+            ax.set_axis_off()
+            pv = self._preview = {"bg": bg, "lc": lc, "sc": sc_, "dark": np.mean(to_rgb(top)) < 0.5}
+        n = len(self.symbols)
+        fig = ax.figure
+        w_in, h_in = fig.get_size_inches()
+        bb = ax.get_position()
+        asp = (w_in * bb.width) / max(h_in * bb.height, 1e-6)
+        L = self.radius / self.zoom
+        ax.set_xlim(self.pan[0] - L * asp, self.pan[0] + L * asp)
+        ax.set_ylim(self.pan[1] - L, self.pan[1] + L)
+        if not n:
+            return
+        vis = np.array([self.show_h or e != "H" for e in self.symbols], bool)
+        scr, depth, sc = self.project(self.xyz)
+        pt_per_unit = (w_in * bb.width * 72.0) / (2 * L * asp)            # 数据单位 (Å) → 磅
+        rad = self._radii() * sc
+        idx = np.where(vis)[0]
+        idx = idx[np.argsort(depth[idx])]                                   # 远的先画
+        rgb = self._atom_rgb()[idx]
+        dz = depth[idx]
+        cue = 0.62 + 0.38 * (dz - dz.min()) / max(np.ptp(dz), 1e-6) if len(dz) else dz
+        sc_ = pv["sc"]
+        sc_.set_offsets(scr[idx])
+        sc_.set_sizes((2 * rad[idx] * pt_per_unit) ** 2)
+        sc_.set_facecolors(np.clip(rgb * cue[:, None], 0, 1))
+        rb = self._bond_radius()
+        lc = pv["lc"]
+        if rb > 0 and len(self.bonds):
+            b = self.bonds[vis[self.bonds[:, 0]] & vis[self.bonds[:, 1]]]
+            lc.set_segments(np.stack([scr[b[:, 0]], scr[b[:, 1]]], 1))
+            lc.set_linewidths(max(0.8, 2 * rb * float(np.mean(sc)) * pt_per_unit))
+            lc.set_color("#C8CFDA" if pv["dark"] else "#6B7280")
+        else:
+            lc.set_segments([])
+        self._screen = (scr, depth, rad, vis)
+
+    def _drop_preview(self):
+        pv = getattr(self, "_preview", None)
+        if pv:
+            for k in ("bg", "lc", "sc"):
+                try:
+                    pv[k].remove()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._preview = None
+
     # ---------------- 绘制 ----------------
     def draw(self, fast=False):
+        if fast and not self.meshes and not self.cylinders:
+            return self.draw_preview()             # 拖动 / 滚轮时的快速预览
         ax = self.ax
+        self._drop_preview()
         for a in self._artists:
             try:
                 a.remove()
@@ -187,10 +270,7 @@ class MolRenderer:
         self._artists = []
         top, bottom = BACKGROUNDS.get(self.background, ("#FFFFFF", "#FFFFFF"))
         dark = np.mean(to_rgb(top)) < 0.5
-        grad = np.linspace(0, 1, 256)[:, None, None] * (np.array(to_rgb(bottom)) - np.array(to_rgb(top))) + \
-            np.array(to_rgb(top))
-        self._artists.append(ax.imshow(grad, extent=(0, 1, 0, 1), transform=ax.transAxes, aspect="auto", zorder=-10,
-                                       interpolation="bicubic"))
+        self._artists.append(_gradient(ax, top, bottom))
         ax.set_axis_off()
         n = len(self.symbols)
         vis = np.array([self.show_h or e != "H" for e in self.symbols], bool) if n else np.zeros(0, bool)

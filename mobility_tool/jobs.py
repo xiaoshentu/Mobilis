@@ -42,7 +42,7 @@ def find_gaussian(user_path=None):
     for c in cands:
         if c and c.is_file():
             exedir = c.parent
-            fc = next((exedir / n for n in ("formchk.exe", "formchk") if (exedir / n).is_file()), None)
+            fc = next((exedir / n for n in ("formchk.exe", "formchk", "formchk.bat") if (exedir / n).is_file()), None)
             fc = fc or shutil.which("formchk")
             return {"exe": str(c), "formchk": str(fc) if fc else None, "exedir": str(exedir)}
     return None

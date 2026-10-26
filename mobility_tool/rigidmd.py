@@ -27,7 +27,9 @@ KB = 0.0019872041             # kcal/mol/K
 COUL = 332.0637               # kcal Å / (mol e²)
 HBAR_MEV_FS = 658.2119569     # ħ / (meV·fs)
 MASS = {"H": 1.008, "B": 10.81, "C": 12.011, "N": 14.007, "O": 15.999, "F": 18.998, "Si": 28.085, "P": 30.974,
-        "S": 32.06, "Cl": 35.45, "Se": 78.971, "Br": 79.904, "I": 126.904}
+        "S": 32.06, "Cl": 35.45, "Se": 78.971, "Br": 79.904, "I": 126.904, "Li": 6.94, "Be": 9.012, "Mg": 24.305,
+        "Al": 26.982, "Cu": 63.546, "Zn": 65.38, "Ga": 69.723, "Ge": 72.630, "Ru": 101.07, "Os": 190.23,
+        "Ir": 192.217, "Pt": 195.084, "Au": 196.967}
 # OPLS-AA (σ/Å, ε/kcal mol⁻¹)
 OPLS = {"CA": (3.55, 0.070), "HA": (2.42, 0.030)}
 Q_CH = 0.115
@@ -81,7 +83,10 @@ class RigidCrystalMD:
     """crys: crystal.read_cif；frames: [(ax, c)] 晶胞内各分子的分子坐标系 (列为轴) 与原点 (即 CEDS.frames)；
     monomer: (symbols, Y) 分子坐标系中的刚性单体 (CEDS 用的同一个单体)；supercell: (na, nb, nc)。"""
 
-    def __init__(self, crys, frames, monomer, supercell=(4, 3, 2), rc=9.0, r_sw=8.0, alpha=0.2, skin=1.0):
+    def __init__(self, crys, frames, monomer, supercell=(4, 3, 2), rc=9.0, r_sw=8.0, alpha=0.2, skin=1.0,
+                 charges=None):
+        """charges: 可选的原子电荷 (单体原子顺序，如 Gaussian ESP 电荷)，代替默认的 OPLS 芳香 C/H 电荷；
+        含 N、O、金属等极性原子的分子 (Alq3、Ir 配合物) 建议提供。"""
         self.sym = list(monomer[0])
         Ym = np.asarray(monomer[1], float)
         miss = sorted({e for e in self.sym if e not in MASS})
@@ -111,6 +116,14 @@ class RigidCrystalMD:
             self.R, self.com, self.I = R, com, w.copy()
         self.Y = (Ym - self.com) @ self.R                           # 主轴系 (体坐标) 中的原子坐标
         self.sig, self.eps, self.q, self.ff_note = force_field(self.sym, Ym)
+        if charges is not None:
+            q = np.asarray(charges, float).ravel()
+            if len(q) != len(self.sym):
+                raise ValueError(f"电荷数 ({len(q)}) 与单体原子数 ({len(self.sym)}) 不一致")
+            self.q = q - q.sum() / len(q)
+            self.ff_note = self.ff_note.split(" + ")[0] + " LJ + 用户电荷 (ESP) DSF 静电" + \
+                ("；" + self.ff_note.split("；", 1)[1] if "；" in self.ff_note else "")
+            self.ff_note = self.ff_note.replace("、电荷 0 (近似)", " (电荷取自 ESP)")
         na, nb, nc = self.sc
         self.cells = [(a, b, c) for a in range(na) for b in range(nb) for c in range(nc)]
         self._cell_index = {cl: i for i, cl in enumerate(self.cells)}
@@ -118,7 +131,14 @@ class RigidCrystalMD:
         Qm0 = np.array([np.asarray(frames[k][0], float) for _ in self.cells for k in range(self.nk)])
         o0 = np.array([np.asarray(frames[k][1], float) + np.array(cl) @ self.lat
                        for cl in self.cells for k in range(self.nk)])
-        self.Q0 = Qm0 @ self.R
+        # 对映体分子 (坐标系为非真转动，见 surrogate.MIRROR)：体坐标取镜像 Yb·D，取向 Q 仍为真转动，积分不变
+        D = np.diag([1.0, 1.0, -1.0])
+        self.mirror_k = [bool(np.linalg.det(np.asarray(frames[k][0], float)) < 0) for k in range(self.nk)]
+        mir = np.array([self.mirror_k[k] for _ in self.cells for k in range(self.nk)])
+        self.mirror_n = mir
+        self.Rn = np.where(mir[:, None, None], (self.R @ D)[None], self.R[None])
+        self.Yn = np.where(mir[:, None, None], (self.Y * np.array([1.0, 1.0, -1.0]))[None], self.Y[None])
+        self.Q0 = Qm0 @ self.Rn
         self.c0 = o0 + np.einsum("nij,j->ni", Qm0, self.com)
         self.N = len(self.c0)
         self.box = np.diag(self.sc) @ self.lat                     # 超胞矢量 (行)
@@ -165,11 +185,11 @@ class RigidCrystalMD:
 
     # ---- 坐标 ----
     def atoms(self, c, Q):
-        return c[..., None, :] + np.einsum("...ij,aj->...ai", Q, self.Y)
+        return c[..., None, :] + np.einsum("...nij,naj->...nai", Q, self.Yn)
 
     def mol_frames(self, c, Q):
-        """质心 c、主轴取向 Q → 分子坐标系 (列为轴) 与原点 (与 molecular_frame / CEDS.frames 一致)。"""
-        Qm = Q @ self.R.T
+        """质心 c、主轴取向 Q → 分子坐标系 (列为轴) 与原点 (与 molecular_frame / CEDS.frames 一致；对映体为非真转动)。"""
+        Qm = np.einsum("...nij,nkj->...nik", Q, self.Rn)
         return Qm, c - np.einsum("...ij,j->...i", Qm, self.com)
 
     def lattice_energy(self):
@@ -263,7 +283,7 @@ class RigidCrystalMD:
         """各原子在实验室系中的均方位移 (相对于轨迹平均位置)，取 (重原子) 平均，即模拟的 U_eq / Å²。
         先扣除整个超胞的质心漂移 (Langevin 下整体平动是无约束的随机游走，不属于晶格振动)。"""
         c = frames["c"] - frames["c"].mean(1, keepdims=True)
-        X = np.einsum("tnij,aj->tnai", frames["Q"], self.Y) + c[:, :, None, :]
+        X = np.einsum("tnij,naj->tnai", frames["Q"], self.Yn) + c[:, :, None, :]
         u = ((X - X.mean(0)) ** 2).sum(-1).mean(0) / 3.0
         hv = np.array([e != "H" for e in self.sym])
         return float(u[:, hv].mean() if heavy_only else u.mean())
@@ -271,6 +291,7 @@ class RigidCrystalMD:
     def save(self, path, frames):
         np.savez_compressed(path, c=frames["c"].astype(np.float32), Q=frames["Q"].astype(np.float32), E=frames["E"],
                             T_tr=frames["T_tr"], T_rot=frames["T_rot"], R=self.R, com=self.com, Y_body=self.Y,
+                            mirror_n=self.mirror_n,
                             symbols=np.array(self.sym), supercell=np.array(self.sc), lattice=self.lat,
                             dt_frame_fs=frames.get("dt_frame_fs", 20.0))
 
@@ -508,9 +529,10 @@ def snapshot_configs(ceds, md, frames, gids, n_per_pair=120, seed=2026, recenter
         fi = np.unique(np.linspace(0, nf - 1, n).round().astype(int))
         while len(fi) < n:                                       # 帧数少于所需构型数时，同一帧取多个实例
             fi = np.sort(np.concatenate([fi, rng.choice(nf, n - len(fi))]))
+        mir = {"mirror": 1} if p.get("mirror") else {}
         for f in fi:
             i = int(rng.integers(ni))
-            c = make_cfg(*q[f, i, :3], gamma=q[f, i, 3], pitch=q[f, i, 4], roll=q[f, i, 5])
+            c = make_cfg(*q[f, i, :3], gamma=q[f, i, 3], pitch=q[f, i, 4], roll=q[f, i, 5], **mir)
             out.append(dict(c, group=str(p["gid"]), variant=f"f{int(f)}i{i}"))
     return out
 

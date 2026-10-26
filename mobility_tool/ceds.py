@@ -27,7 +27,7 @@ import time
 import numpy as np
 
 from .scanflow import KCAL_R, OPS, PARAM_KEYS, PROPER, angles_from_R, apply_op, make_cfg, molecule_ops
-from .surrogate import CARRIERS, build_B, molecular_frame, rotation
+from .surrogate import CARRIERS, MIRROR, build_B, molecular_frame, rotation
 
 ANG_KEYS = ("gamma", "pitch", "roll")
 DEFAULT_HALF = {"z": 0.5, "dx": 0.8, "dy": 0.8, "gamma": 10.0, "pitch": 10.0, "roll": 10.0}
@@ -56,7 +56,9 @@ def pair_params(axA, cA, axB, cB):
     axA, axB = np.asarray(axA, float), np.asarray(axB, float)
     R = np.swapaxes(axA, -1, -2) @ axB
     t = np.einsum("...ji,...j->...i", axA, np.asarray(cB, float) - np.asarray(cA, float))
-    R2 = R.reshape(-1, 3, 3)
+    R2 = R.reshape(-1, 3, 3).copy()
+    neg = np.linalg.det(R2) < 0                     # 对映体二聚体：R = R′·M，只取真转动部分 R′ (见 surrogate.MIRROR)
+    R2[neg] = R2[neg] * MIRROR
     ang = np.array([angles_from_R(r) for r in R2]).reshape(R.shape[:-2] + (3,))
     return np.concatenate([t[..., 2:3], t[..., 0:1], t[..., 1:2], ang], axis=-1)
 
@@ -66,6 +68,8 @@ def choose_g(axA, axB, ops):
     best = None
     for op in ["E"] + [o for o in PROPER if o in ops]:
         R = axA.T @ (axB * np.array(OPS[op], float))
+        if np.linalg.det(R) < 0:
+            R = R * MIRROR
         ang = math.degrees(math.acos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
         if best is None or ang < best[0] - 1e-9:
             best = (ang, op)
@@ -371,10 +375,12 @@ class EHTSurface:
     source = "eht"
     frozen = []
 
-    def __init__(self, symbols, Y):
+    def __init__(self, symbols, Y, mirror=False):
         from .eht import monomer
         self.sym, self.Y = list(symbols), np.asarray(Y, float)
+        self.mirror = bool(mirror)
         self.mono = monomer(self.sym, self.Y)
+        self.mono_b = monomer(self.sym, self.Y * MIRROR) if self.mirror else self.mono
         self.A = [(s, *p) for s, p in zip(self.sym, self.Y)]
         self._cache = {}
 
@@ -385,9 +391,9 @@ class EHTSurface:
             return self._cache[key]
         z, dx, dy, g, p, r = q
         R = rotation(g, r, p)
-        B = build_B(self.Y, z, dx, dy, g, r, p)
+        B = build_B(self.Y, z, dx, dy, g, r, p, mirror=self.mirror)
         shells, _, _ = build_basis(self.sym, B)
-        mb = dict(self.mono, shells=shells, C=rotate_coefficients(self.mono["shells"], self.mono["C"], R))
+        mb = dict(self.mono_b, shells=shells, C=rotate_coefficients(self.mono_b["shells"], self.mono_b["C"], R))
         res = eht_transfer_integrals(self.A, [(s, *x) for s, x in zip(self.sym, B)], esd=False, _mono_b=mb)["results"]
         out = {"hole": res["HOMO"]["J_eff_meV"], "electron": res["LUMO"]["J_eff_meV"]}
         self._cache[key] = out
@@ -458,8 +464,14 @@ class CEDS:
             p["g"] = choose_g(axA, axB, self.ops)
             G = np.diag(OPS[p["g"]]).astype(float)
             q = pair_params(axA, cA, axB @ G, cB)
-            p["center"] = make_cfg(*q[:3], gamma=q[3], pitch=q[4], roll=q[5])
+            p["mirror"] = bool(np.linalg.det(axA.T @ axB) < 0)
+            p["center"] = make_cfg(*q[:3], gamma=q[3], pitch=q[4], roll=q[5], **({"mirror": 1} if p["mirror"] else {}))
             p["q0"] = q
+        self.mirror = [bool(np.linalg.det(ax) < 0) for ax, _ in self.frames]
+        if any(self.mirror):
+            nm = sum(p.get("mirror", False) for p in self.pairs)
+            self.notes.append(f"晶胞中含对映体分子 ({sum(self.mirror)}/{len(self.mirror)} 个为参考单体的镜像)：{nm} 个二聚体组为"
+                              "对映体对，B 用镜像单体构建，ADF 需要另算镜像单体片段 mono_m.t21")
 
     def calibrate(self, target_ueq, T=300.0, n_samples=800, gid=None, iterations=2, seed=11):
         """按晶体学 U_eq (重原子平均，Å²) 缩放对势：谐振近似下 <u²> ∝ kT/势能曲率，故 scale ← scale·U_model/U_target。
@@ -481,10 +493,10 @@ class CEDS:
         """先做 MC (不需要 DFT)，按各参数涨落的 ±k·σ 确定每个二聚体局域扫描的范围。
         |V0| (EHT 估计) < vmin 的弱耦合二聚体不需要局域扫描。返回 {组号: {参数: 半宽}}。"""
         floor = dict({"z": 0.12, "dx": 0.15, "dy": 0.15, "gamma": 2.0, "pitch": 2.0, "roll": 2.0}, **(floor or {}))
-        eht = EHTSurface(self.sym, self.Y)
+        eht = {m: EHTSurface(self.sym, self.Y, mirror=m) for m in {bool(p.get("mirror")) for p in self.pairs}}
         out = {}
         for p in self.pairs:
-            if max(abs(eht(p["q0"], c)[0]) for c in CARRIERS) < vmin:
+            if max(abs(eht[bool(p.get("mirror"))](p["q0"], c)[0]) for c in CARRIERS) < vmin:
                 continue
             sim = DimerMC(self.crys, self.mols, p["ref"], p["mol"], p["translation"], self.pot, self.env_cutoff)
             mc = sim.run(T, n_samples, 5, 2000, seed + p["gid"])
@@ -673,7 +685,7 @@ def surfaces_from_project(project, ceds, level=None, half=None, min_points=12, a
         if models is not None and coplanar:
             surf[p["gid"]], why[p["gid"]] = SeparableSurface(models), "共面网格可分离模型 (转角冻结)"
         elif eht_fallback:
-            surf[p["gid"]], why[p["gid"]] = EHTSurface(ceds.sym, ceds.Y), f"EHT (DFT 数据不足：{reason})"
+            surf[p["gid"]], why[p["gid"]] = EHTSurface(ceds.sym, ceds.Y, p.get("mirror")), f"EHT (DFT 数据不足：{reason})"
         else:
             why[p["gid"]] = f"无曲面：{reason}"
     return surf, why
@@ -747,7 +759,7 @@ def combined_surfaces(ceds, project=None, level=None, product=None, eht_fallback
         elif s is not None:
             surf[g], why[g] = s, proj_w.get(g, s.describe())
         elif eht_fallback:
-            surf[g] = EHTSurface(ceds.sym, ceds.Y)
+            surf[g] = EHTSurface(ceds.sym, ceds.Y, next((p.get("mirror") for p in ceds.pairs if p["gid"] == g), False))
             why[g] = "EHT (没有 DFT 曲面)"
         else:
             why[g] = proj_w.get(g, "无曲面")

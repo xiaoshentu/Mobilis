@@ -270,15 +270,27 @@ def run_kmc(graph, lam_int, T=300.0, method="marcus", lam_out=0.0, lam_out_model
 
 
 def analytic_equivalent_sites(graph, lam_int, T=300.0, lam_out=0.0):
-    """各位点环境对称等价、且每个位点的跳跃矢量成 ±v 对时的零场精确迁移率张量 (含多分子晶胞)：
-    μ_ab = (1/n_site) Σ_i Σ_{j∈i} k_ij r_a r_b / (2kT)。"""
+    """多分子晶胞 (各位点能量相同) 的零场精确迁移率张量，周期格子上随机行走的均匀化公式：
+    先解修正位移 χ_i：Σ_j k_ij (r_ij + χ_j − χ_i) = 0 (每个位点的局部平均位移为零)，
+    再 D = (1/2n) Σ_ij k_ij (r_ij + χ_j − χ_i)(r_ij + χ_j − χ_i)ᵀ，μ = D / kT。
+    每个位点的跳跃矢量成 ±v 对时 χ = 0，退化为 μ = (1/n) Σ k r r / (2kT)；P2₁ 等晶体 (如 DNTT、并五苯) 的
+    分子间跳跃不成对，必须用这个一般式。"""
     kt = KB_EV * T
-    mu = np.zeros((3, 3))
-    for (_, _, v, j, m, _t) in graph["edges"]:
-        k = rate_marcus(j, lam_int + lam_out, 0.0, T) * m
-        vc = np.asarray(v) * 1e-8
-        mu += 0.5 * k * np.outer(vc, vc)
-    return mu / kt / graph["n_sites"]
+    n = int(graph["n_sites"])
+    E = [(int(i), int(jj), np.asarray(v, float) * 1e-8, rate_marcus(j, lam_int + lam_out, 0.0, T) * m)
+         for (i, jj, v, j, m, _t) in graph["edges"]]
+    L = np.zeros((n, n))
+    b = np.zeros((n, 3))
+    for i, jj, vc, k in E:
+        b[i] += k * vc
+        L[i, i] -= k
+        L[i, jj] += k
+    chi = np.linalg.lstsq(L, -b, rcond=None)[0]                 # 规范自由度 (整体平移) 由最小范数解确定
+    D = np.zeros((3, 3))
+    for i, jj, vc, k in E:
+        u = vc + chi[jj] - chi[i]
+        D += 0.5 * k * np.outer(u, u)
+    return D / n / kt
 
 
 def exact_1d_ring_disorder(energies, a_cm, J, lam, T, N):

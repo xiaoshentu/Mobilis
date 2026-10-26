@@ -159,7 +159,11 @@ def read_cif(path):
                 keep[j] = False
     syms = [s_ for s_, k in zip(alls, keep) if k]
     fracs = allf[keep]
+    sg = next((str(tags[k]).strip().strip("'\"") for k in ("_space_group_name_H-M_alt", "_symmetry_space_group_name_H-M",
+                                                            "_space_group_name_h-m_alt", "_symmetry_space_group_name_h-m")
+               if k in tags and str(tags[k]).strip() not in ("?", ".")), "")
     return {"cell": cell, "lattice": lat, "symbols": syms, "frac": np.array(fracs), "n_symops": len(ops),
+            "spacegroup": " ".join(sg.split()),
             "symops": [tuple(np.asarray(x, float).tolist() for x in _parse_symop(o)) for o in ops],
             "warnings": warnings}
 

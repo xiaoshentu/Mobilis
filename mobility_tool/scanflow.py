@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .surrogate import CARRIERS, build_B, clash_ratio, molecular_frame, rotation
+from .surrogate import CARRIERS, MIRROR, build_B, clash_ratio, is_mirror, molecular_frame, rotation
 
 PARAM_KEYS = ("z", "dx", "dy", "gamma", "pitch", "roll")
 XC_LINES = {"PW91": "GGA PW91", "PBE": "GGA PBE", "BP86": "GGA BP86", "BLYP": "GGA BLYP",
@@ -39,7 +39,7 @@ OPS = {"E": (1, 1, 1), "C2x": (1, -1, -1), "C2y": (-1, 1, -1), "C2z": (-1, -1, 1
        "i": (-1, -1, -1), "σxy": (1, 1, -1), "σxz": (1, -1, 1), "σyz": (-1, 1, 1)}
 PROPER = ("C2x", "C2y", "C2z")
 MANIFEST_COLS = ["id", "z", "dx", "dy", "gamma", "roll", "pitch", "dmin_A", "min_ratio_vdW", "status", "set", "rep",
-                 "op", "group", "variant"]
+                 "op", "group", "variant", "mirror"]
 KCAL_R = 0.0019872043                                      # kcal mol⁻¹ K⁻¹
 
 
@@ -222,6 +222,15 @@ def _atoms_lines(symbols, X, frag=None):
     return out
 
 
+def _renumber(lines, offset):
+    """原子行的序号加 offset (把单独生成的 B 原子行接在 A 之后)。"""
+    out = []
+    for ln in lines:
+        n, rest = ln.split(" ", 1)
+        out.append(f"{int(n) + offset} {rest}")
+    return out
+
+
 def _ascii_path_warning(p):
     s = str(p)
     if any(ord(ch) > 127 for ch in s) or " " in s:
@@ -348,7 +357,7 @@ class ScanProject:
         return self._ops
 
     def B_coords(self, c):
-        return build_B(self.Y, c["z"], c["dx"], c["dy"], c["gamma"], c["roll"], c["pitch"])
+        return build_B(self.Y, c["z"], c["dx"], c["dy"], c["gamma"], c["roll"], c["pitch"], mirror=is_mirror(c))
 
     def dimer_atoms(self, c):
         sym = self.symbols
@@ -365,26 +374,36 @@ class ScanProject:
         name = f"{xc}_{basis}" + ("_D3BJ" if d3 else "")
         d = self.root / "monomer" / name
         d.mkdir(parents=True, exist_ok=True)
-        body = _atoms_lines(self.symbols, [self.Y])
-        kw = keyword_block(xc, basis, d3)
-        title = f"TITLE mono fragment {name} ({self.meta['monomer']['report']['formula']})\n\nATOMS\n"
-        run = '#! /bin/sh\n\n"$ADFBIN/adf" <<eor\n' + title + "\n".join(body) + "\nEND\n\n" + kw + "NOPRINT LOGFILE\n\neor\n"
-        (d / "mono.run").write_bytes(run.encode("ascii"))
-        dp = d.as_posix()
-        sh = (f'#!/bin/sh\ncd "{dp}"\n"$ADFBIN/adf" <<eor > "{dp}/mono.out" 2>&1\n' + title + "\n".join(body) +
-              "\nEND\n\n" + kw + "NOPRINT LOGFILE\n\neor\n" + f'if [ -s TAPE21 ]; then mv -f TAPE21 "{dp}/mono.t21"; fi\n')
-        (d / "run_mono_adf.sh").write_bytes((sh + "# 结果文件: mono.t21\n").encode("utf-8"))
         self.meta["levels"][name] = {"xc": xc, "basis": basis, "d3": bool(d3), "dir": f"monomer/{name}"}
+        self._write_mono_job(name, mirror=False)
         self.save()
         return name
+
+    def _write_mono_job(self, level, mirror=False):
+        """单体片段计算 mono.run / run_mono_adf.sh；mirror=True 时为镜像单体 (对映体分子) 的 mono_m.*。"""
+        lev = self.meta["levels"][level]
+        d = self.root / lev["dir"]
+        d.mkdir(parents=True, exist_ok=True)
+        stem = "mono_m" if mirror else "mono"
+        body = _atoms_lines(self.symbols, [self.Y * MIRROR if mirror else self.Y])
+        kw = keyword_block(lev["xc"], lev["basis"], lev["d3"])
+        what = "mirror-image (enantiomer) fragment" if mirror else "fragment"
+        title = f"TITLE mono {what} {level} ({self.meta['monomer']['report']['formula']})\n\nATOMS\n"
+        run = '#! /bin/sh\n\n"$ADFBIN/adf" <<eor\n' + title + "\n".join(body) + "\nEND\n\n" + kw + "NOPRINT LOGFILE\n\neor\n"
+        (d / f"{stem}.run").write_bytes(run.encode("ascii"))
+        dp = d.as_posix()
+        sh = (f'#!/bin/sh\ncd "{dp}"\n"$ADFBIN/adf" <<eor > "{dp}/{stem}.out" 2>&1\n' + title + "\n".join(body) +
+              "\nEND\n\n" + kw + "NOPRINT LOGFILE\n\neor\n" + f'if [ -s TAPE21 ]; then mv -f TAPE21 "{dp}/{stem}.t21"; fi\n')
+        (d / f"run_{stem}_adf.sh").write_bytes((sh + f"# 结果文件: {stem}.t21\n").encode("utf-8"))
+        return d / f"{stem}.run"
 
     def level_dir(self, level):
         if level not in self.meta["levels"]:
             raise KeyError(f"没有计算层级 {level}；请先添加")
         return self.root / self.meta["levels"][level]["dir"]
 
-    def t21(self, level):
-        return self.level_dir(level) / "mono.t21"
+    def t21(self, level, mirror=False):
+        return self.level_dir(level) / ("mono_m.t21" if mirror else "mono.t21")
 
     def import_fragment(self, level, t21_path):
         """沿用已有的 mono.t21 (例如已有扫描所用的同一个文件)，保证与已有数据相位一致。"""
@@ -428,9 +447,11 @@ class ScanProject:
         sym = self.symbols
         req = []                                                # 第一遍：每个请求的代表构型
         for c in configs:
-            own = make_cfg(**{k: c[k] for k in PARAM_KEYS})
+            mir = {"mirror": 1} if is_mirror(c) else {}
+            own = make_cfg(**{k: c[k] for k in PARAM_KEYS}, **mir)
             rep, op = canonical(own, ops) if reduce else (own, "E")
-            req.append((own, rep, op, cfg_key(rep), cfg_key(own) == cfg_key(rep),
+            rep = dict(rep, **mir)
+            req.append((own, rep, op, cfg_key(rep) + (bool(mir),), cfg_key(own) == cfg_key(rep),
                         {k: c.get(k, "") for k in ("set", "group", "variant")}))
         owner = {}                                              # 代表构型 → 本身就是它的第一个请求 (保留其标签)
         for n, (_, _, _, key, is_rep, _) in enumerate(req):
@@ -501,11 +522,15 @@ class ScanProject:
         info = self.scan_info(name)
         level = info["level"]
         t21 = self.t21(level).resolve().as_posix()
+        t21m = self.t21(level, mirror=True).resolve().as_posix()
         lev = self.meta["levels"][level]
         kw = keyword_block(lev["xc"], lev["basis"], lev["d3"]).rstrip("\n")
         for old in list(d.glob("batch_*.run")) + list(d.glob("batch_*.sh")):
             old.unlink()
         comp = [r for r in self.manifest(name) if r["status"] == "ok" and not r["rep"]]
+        any_m = any(is_mirror(r) for r in comp)
+        if any_m and not (self.level_dir(level) / "mono_m.run").exists():
+            self._write_mono_job(level, mirror=True)
         chunk = max(1, int(info.get("chunk") or len(comp) or 1))
         root = d.resolve().as_posix()
         names = []
@@ -517,15 +542,24 @@ class ScanProject:
                      f"# all dimers use the same fragment file (phase-consistent signs of V): {t21}",
                      f'if [ ! -s "{t21}" ]; then',
                      f'  echo "ERROR: {t21} not found, run monomer/{level}/mono.run first"', "  exit 1", "fi", ""]
+            if any(is_mirror(r) for r in part):
+                lines[-1:-1] = [f"# enantiomer pairs: fragment B = mirror-image monomer {t21m}",
+                                f'if [ ! -s "{t21m}" ]; then',
+                                f'  echo "ERROR: {t21m} not found, run monomer/{level}/mono_m.run first"', "  exit 1", "fi"]
             for r in part:
                 out = f"{root}/outputs/{r['id']}.out"
                 done = f"{root}/outputs/{r['id']}.done"
                 X = [self.Y, self.B_coords(r)]
+                m = is_mirror(r)
+                atoms = _atoms_lines(self.symbols, X[:1], "mono") + \
+                    [ln.replace("f=mono/1", "f=mono_m/1" if m else "f=mono/2")
+                     for ln in _renumber(_atoms_lines(self.symbols, X[1:], "mono"), len(self.symbols))]
+                frags = [f"    mono {t21}"] + ([f"    mono_m {t21m}"] if m else [])
                 lines += [f'if [ ! -f "{done}" ]; then', f'echo "running {r["id"]}"',
                           f'"$ADFBIN/adf" <<eor > "{out}" 2>&1',
                           f"TITLE {r['id']} z={r['z']} dx={r['dx']} dy={r['dy']} gamma={r['gamma']} roll={r['roll']} "
-                          f"pitch={r['pitch']}", "", "ATOMS"] + _atoms_lines(self.symbols, X, "mono") + \
-                         ["END", "", kw, "", "Fragments", f"    mono {t21}", "end", "NOPRINT LOGFILE",
+                          f"pitch={r['pitch']}" + (" mirror" if m else ""), "", "ATOMS"] + atoms + \
+                         ["END", "", kw, "", "Fragments"] + frags + ["end", "NOPRINT LOGFILE",
                           "TRANSFERINTEGRALS", "", "eor", f'if [ $? -eq 0 ]; then echo ok > "{done}"; fi', "fi", ""]
             lines.append('echo "batch finished"')
             text = "\n".join(lines) + "\n"
@@ -578,6 +612,10 @@ class ScanProject:
                 if run.exists() and t21.stat().st_mtime + 1 < run.stat().st_mtime and \
                         not (t21.parent / "imported_from.txt").exists():
                     warns.append("mono.t21 比 mono.run 旧：可能来自修改单体之前的计算，请确认")
+            if any(is_mirror(r) for r in self.manifest(name) if r["status"] == "ok" and not r["rep"]):
+                tm = self.t21(level, mirror=True)
+                if not tm.exists() or tm.stat().st_size == 0:
+                    errors.append(f"缺少镜像单体片段文件 {tm}：本扫描含对映体二聚体，请先运行 monomer/{level}/mono_m.run")
         elif not info.get("imported"):
             errors.append(f"扫描所属的计算层级 {level} 不在项目中")
         for p in (self.root, d):
@@ -768,14 +806,17 @@ class ScanProject:
                 if np.prod(sgn) < 0:
                     continue                                  # 只取保持手性的坐标轴取法
                 R = axA.T @ (axB * sgn)
+                if np.linalg.det(R) < 0:                      # 对映体：取真转动部分，B 用镜像单体
+                    R = R * MIRROR
                 ang = math.degrees(math.acos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
                 if best is None or ang < best[0]:
                     best = (ang, R)
             R = best[1]
             t = axA.T @ (cB - cA)
             gm, pt, rl = angles_from_R(R)
+            mir = {"mirror": 1} if np.linalg.det(axA.T @ axB) < 0 else {}
             c = make_cfg(t[2], t[0], t[1], gm, pt, rl, set="crystal", group=str(g["id"]),
-                         variant=g.get("label", f"G{g['id']}"))
+                         variant=g.get("label", f"G{g['id']}"), **mir)
             Bf = self.B_coords(c)
             Bc = (xb - cA) @ axA                                # 晶体 B 在 A 坐标系中
             from scipy.optimize import linear_sum_assignment

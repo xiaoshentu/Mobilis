@@ -35,10 +35,25 @@ if not getattr(_pathlib.Path.read_text, "_mobilis", False):
     _pathlib.Path.read_text = _read_text
     _pathlib.Path.write_text = _write_text
 
+
+def _safe_console():
+    """中文 Windows 控制台为 GBK，不能输出 Å、²、⟨、∇ 等字符；改为用 ? 代替而不是抛出 UnicodeEncodeError。"""
+    import sys
+    for st in (sys.stdout, sys.stderr):
+        enc = (getattr(st, "encoding", None) or "").lower().replace("-", "")
+        if enc and enc != "utf8" and hasattr(st, "reconfigure"):
+            try:
+                st.reconfigure(errors="replace")
+            except Exception:                      # noqa: BLE001  (被替换的流可能不支持)
+                pass
+
+
+_safe_console()
+
 from .mobility import compute_mobility, marcus_rate
 from .reorganization import analyze_reorg, generate_reorg_inputs
 from .transfer_integral import calc_transfer_integrals, generate_ti_inputs
 
-__version__ = "1.16.0"
+__version__ = "1.20.2"
 __author__ = "Yarui Shi"
 __affiliation__ = "安阳师范学院 (Anyang Normal University)"

@@ -455,9 +455,13 @@ def load_traj(path):
     miss = [k for k in need if k not in d]
     if miss:
         raise ValueError(f"轨迹文件缺少 {miss}；请用“全晶体 MD”保存的 .npz")
-    return {"c": d["c"].astype(float), "Q": d["Q"].astype(float), "Y": d["Y_body"].astype(float),
-            "symbols": [str(s) for s in d["symbols"]], "supercell": tuple(int(x) for x in d["supercell"]),
-            "lattice": d["lattice"].astype(float), "dt_frame_fs": float(d["dt_frame_fs"]) if "dt_frame_fs" in d else 20.0}
+    out = {"c": d["c"].astype(float), "Q": d["Q"].astype(float), "Y": d["Y_body"].astype(float),
+           "symbols": [str(s) for s in d["symbols"]], "supercell": tuple(int(x) for x in d["supercell"]),
+           "lattice": d["lattice"].astype(float), "dt_frame_fs": float(d["dt_frame_fs"]) if "dt_frame_fs" in d else 20.0}
+    if "mirror_n" in d and np.any(d["mirror_n"]):                       # 对映体分子的镜像体坐标
+        Y = out["Y"]
+        out["Yn"] = np.where(d["mirror_n"].astype(bool)[:, None, None], (Y * np.array([1.0, 1.0, -1.0]))[None], Y[None])
+    return out
 
 
 def box_shifts(box, R):
@@ -495,6 +499,7 @@ def static_site_energies(c, A, box, dq, q0, R=30.0):
 def traj_from_md(md, frames):
     """RigidCrystalMD 与 run 的采样轨迹 → md_site_energies 的输入 (不经过文件)。"""
     return {"c": np.asarray(frames["c"], float), "Q": np.asarray(frames["Q"], float), "Y": np.asarray(md.Y, float),
+            "Yn": np.asarray(md.Yn, float),
             "symbols": list(md.sym), "supercell": tuple(md.sc), "lattice": np.asarray(md.lat, float),
             "dt_frame_fs": float(frames.get("dt_frame_fs", 20.0))}
 
@@ -519,7 +524,9 @@ def md_site_energies(traj, charges, n_frames=24, centers=4, R=14.0, nk=None, alp
     Ee = np.zeros_like(Eh)
     for a, f in enumerate(fidx):
         c, Q = tr["c"][f], tr["Q"][f]
-        A = c[:, None, :] + np.einsum("nij,aj->nai", Q, Yb)                 # (N,nat,3)
+        Yn = tr.get("Yn")
+        A = c[:, None, :] + (np.einsum("nij,naj->nai", Q, Yn) if Yn is not None
+                             else np.einsum("nij,aj->nai", Q, Yb))              # (N,nat,3)
         for b, I in enumerate(cen):
             if on_progress:
                 on_progress(f"快照 {a + 1}/{len(fidx)}，分子 {b + 1}/{len(cen)}")

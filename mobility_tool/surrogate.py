@@ -159,6 +159,15 @@ def matched_frame(ref_symbols, ref_Y, symbols, xyz, mode="all"):
             best, r0 = (r, a), r
         elif r < best[0]:
             best = (r, a)
+    # 对映体：非真转动 (第三轴取反)。只有明显好于真转动时才采用 (非手性分子的镜像与自身重合，不会被选中)
+    bm = None
+    for s in ((1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)):
+        a = ax * np.array(s, float) * MIRROR
+        r = _matched_rmsd(ref_symbols, ref_Y @ a.T + c, symbols, xyz)
+        if bm is None or r < bm[0]:
+            bm = (r, a)
+    if bm[0] < 0.5 * best[0] and best[0] > 0.3:
+        return bm[1], c, bm[0]
     if r0 <= best[0] + 0.02:
         return ax, c, r0
     return best[1], c, best[0]
@@ -178,8 +187,23 @@ def rotation(gamma=0.0, roll=0.0, pitch=0.0):
     return rot("z", gamma) @ rot("y", pitch) @ rot("x", roll)
 
 
-def build_B(Y, z, dx, dy, gamma=0.0, roll=0.0, pitch=0.0):
-    return np.asarray(Y) @ rotation(gamma, roll, pitch).T + np.array([dx, dy, z])
+# 对映体 (镜像) 分子：在分子坐标系中把第三个坐标取反。手性分子 (如 mer-Alq3、Ir(C^N)2(acac)) 的中心对称晶体中
+# 一半分子是参考单体的镜像，不能只用转动 + 平移重合；这时坐标系 ax 取非真转动 (det = −1)，二聚体参数 q 只描述
+# 真转动部分，另加 mirror 标记，B 用镜像单体构建 (ADF 片段也用镜像单体的片段文件 mono_m.t21)。
+MIRROR = np.array([1.0, 1.0, -1.0])
+
+
+def is_mirror(c):
+    """构型字典的 mirror 标记 (manifest 中为 "1"/"" 或布尔)。"""
+    v = c.get("mirror", "") if isinstance(c, dict) else c
+    return str(v).strip().lower() in ("1", "true", "yes", "1.0")
+
+
+def build_B(Y, z, dx, dy, gamma=0.0, roll=0.0, pitch=0.0, mirror=False):
+    Y = np.asarray(Y, float)
+    if mirror:
+        Y = Y * MIRROR
+    return Y @ rotation(gamma, roll, pitch).T + np.array([dx, dy, z])
 
 
 def clash_ratio(symbols, A, B):

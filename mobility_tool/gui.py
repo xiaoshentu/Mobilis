@@ -23,6 +23,9 @@ from .i18n import tr as T
 
 # ---------------- 界面翻译层: 包装 ttk 控件 / 对话框，使所有显示文字经过 T() ----------------
 def _tr_kw(kw):
+    if isinstance(kw.get("wraplength"), int):            # 按 100% 屏幕缩放设计 → 高分屏 / 大字号下同比放大
+        from .theme import px as _px
+        kw["wraplength"] = _px(kw["wraplength"])
     if "text" in kw:
         kw["text"] = T(kw["text"])
     if "title" in kw:
@@ -43,7 +46,20 @@ def _translating(cls):
 
     class C(cls):
         def __init__(self, *a, **kw):
-            super().__init__(*a, **_tr_kw(kw))
+            if cls.__name__ in ("Button", "Label", "Checkbutton", "Radiobutton") and isinstance(kw.get("width"), int) \
+                    and kw["width"] > 0 and "text" in kw:
+                kw["width"] = -kw["width"]          # 负值 = 最小宽度：译文较长时不截断 ("Browse" 而非 "Brows")
+            orig = kw.get("text")
+            kw = _tr_kw(kw)
+            master = a[0] if a else kw.get("master")
+            router = getattr(master, "__dict__", {}).get("_router")      # 只认显式设置的属性 (测试桩的 __getattr__ 不算)
+            if router is not None:                  # 分区面板：分区成为标签页，其余控件归入当前分区
+                master, kw = router.route(cls.__name__, kw, orig)
+                if a:
+                    a = (master,) + tuple(a[1:])
+                else:
+                    kw["master"] = master
+            super().__init__(*a, **kw)
 
         def configure(self, *a, **kw):
             return super().configure(*a, **_tr_kw(kw))
@@ -52,6 +68,17 @@ def _translating(cls):
 
         def heading(self, col, *a, **kw):
             return super().heading(col, *a, **_tr_kw(kw))
+
+        def column(self, col, *a, **kw):
+            from .theme import px as _px
+            for k in ("width", "minwidth"):
+                if isinstance(kw.get(k), int):
+                    kw[k] = _px(kw[k])
+            try:
+                fn = super().column
+            except AttributeError:            # 测试用的桩控件没有 column
+                return None
+            return fn(col, *a, **kw)
 
         def insert(self, *a, **kw):
             if "values" in kw:
@@ -71,7 +98,8 @@ def _translating(cls):
 
 
 class _TTK:
-    WRAP = {"Label", "Button", "Checkbutton", "Radiobutton", "LabelFrame", "Treeview", "Notebook", "Combobox"}
+    WRAP = {"Label", "Button", "Checkbutton", "Radiobutton", "LabelFrame", "Treeview", "Notebook", "Combobox",
+            "Frame", "Entry", "Spinbox", "Scrollbar", "Separator", "Progressbar", "Scale", "PanedWindow"}
 
     def __getattr__(self, name):
         obj = getattr(_ttk, name)
@@ -102,8 +130,10 @@ class MappedVar(tk.StringVar):
     """下拉框: 显示翻译后的文字，程序读取到的仍是原始 (中文) 取值。"""
 
     def __init__(self, value="", mapping=None):
-        self._map = mapping or {}
-        self._rev = {v: k for k, v in self._map.items()}
+        # 显示值经过 T() 翻译 (与下拉框选项一致)；读取时译文与原文都映射回原始取值
+        self._map = {k: T(v) if isinstance(v, str) else v for k, v in (mapping or {}).items()}
+        self._rev = {v: k for k, v in (mapping or {}).items()}
+        self._rev.update({v: k for k, v in self._map.items()})
         super().__init__(value=self._map.get(str(value), str(value)))
 
     def get(self):
@@ -135,7 +165,7 @@ from .gaussian_io import BOHR2ANG, HARTREE2EV, read_geometry, write_xyz  # noqa:
 from .mobility import angular_mobility, angular_mobility_2d, compute_mobility, plane_angles  # noqa: E402
 from .reorganization import BASIS_SETS, FUNCTIONALS, analyze_reorg, generate_reorg_inputs  # noqa: E402
 from .transfer_integral import calc_transfer_integrals, generate_ti_inputs  # noqa: E402
-from .theme import (FONT_SCALES, PALETTE, ScrollPanel, apply_theme, enable_hidpi, set_scale, stripe,  # noqa: E402
+from .theme import (FONT_SCALES, PALETTE, ScrollPanel, SectionPanel, apply_theme, enable_hidpi, set_scale, stripe,  # noqa: E402
                     styled_text, sz)
 from .viewer import draw_structure  # noqa: E402
 from .jobs import JobQueue, find_gaussian, path_problems  # noqa: E402
@@ -223,8 +253,8 @@ class FileEntry(ttk.Frame):
         super().__init__(parent)
         self.var = tk.StringVar()
         self.mode, self.filetypes, self.command = mode, filetypes or [("所有文件", "*.*")], command
-        ttk.Label(self, text=label, width=12).pack(side="left")
-        self.box = ttk.Combobox(self, textvariable=self.var, width=width, postcommand=self._fill)
+        ttk.Label(self, text=label, width=-12).pack(side="left")          # 负宽度 = 最小宽度，英文标签不被截断
+        self.box = ttk.Combobox(self, textvariable=self.var, width=min(width, 16), postcommand=self._fill)
         self.box.pack(side="left", fill="x", expand=True)
         try:
             self.box.bind("<<ComboboxSelected>>", self._chosen)
@@ -250,13 +280,20 @@ class FileEntry(ttk.Frame):
         out = []
         for r in _cfg().get("recent_files", []):
             rp = Path(r)
-            if self.mode == "dir":
-                if rp.is_dir():
+            try:
+                if self.mode == "dir":
+                    if rp.is_dir():
+                        out.append(str(rp))
+                elif rp.is_file() and self._matches(rp):
                     out.append(str(rp))
-            elif rp.is_file() and self._matches(rp):
-                out.append(str(rp))
+            except OSError:              # 无权限 / 已删除的临时目录
+                continue
         wd = _cfg().get("workdir")
-        if wd and Path(wd).is_dir():
+        try:
+            wd_ok = bool(wd) and Path(wd).is_dir()
+        except OSError:
+            wd_ok = False
+        if wd_ok:
             try:
                 base = Path(wd)
                 if self.mode == "dir":
@@ -374,7 +411,7 @@ def field(parent, row, label, default="", width=14, values=None, col=0):
 class PlotPanel(ttk.Frame):
     def __init__(self, parent, projection=None, figsize=(6, 5)):
         super().__init__(parent, style="Card.TFrame", padding=6)
-        self.fig = Figure(figsize=figsize, dpi=100, facecolor=PALETTE["card"])
+        self.fig = Figure(figsize=figsize, dpi=100, facecolor=PALETTE["plot_bg"])
         self.projection = projection
         self.ax = self.fig.add_subplot(111, projection=projection)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
@@ -383,12 +420,12 @@ class PlotPanel(ttk.Frame):
         self.toolbar = tb
         for w in [tb] + list(tb.winfo_children() or []):
             try:
-                w.configure(background=PALETTE["card"])
+                w.configure(background=PALETTE["plot_bg"])
             except Exception:  # noqa: BLE001
                 pass
         widget = self.canvas.get_tk_widget()
         try:
-            widget.configure(highlightthickness=0, background=PALETTE["card"])
+            widget.configure(highlightthickness=0, background=PALETTE["plot_bg"])
         except Exception:  # noqa: BLE001
             pass
         widget.pack(fill="both", expand=True)
@@ -431,6 +468,27 @@ class ViewerPanel(ttk.Frame):
         except Exception:  # noqa: BLE001
             pass
         w.pack(fill="both", expand=True)
+        self._full_job = None
+
+    def zoom(self, factor, full=None):
+        """滚轮缩放：先画快速预览，停止滚动 200 ms 后再画完整图像 (full 为完整重绘函数，默认 renderer.draw)。"""
+        self.renderer.zoom *= factor
+        self.renderer.draw(fast=True)
+        self.canvas.draw_idle()
+        if self._full_job:
+            try:
+                self.after_cancel(self._full_job)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _full():
+            self._full_job = None
+            (full or self.renderer.draw)()
+            self.canvas.draw_idle()
+        try:
+            self._full_job = self.after(200, _full)
+        except Exception:  # noqa: BLE001
+            _full()
 
 
 class EditableTree(ttk.Treeview):
@@ -499,11 +557,13 @@ class StructureTab(ttk.Frame):
         self.atoms, self.crys, self.mols, self.dimer_res = None, None, None, None
         self.scene, self.sel, self._busy = [], [], False
         self._bond_cache, self.scene_bonds = {}, None
-        panel = ScrollPanel(self)
-        panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
+        # 主窗口布局：三维结构占满主窗口，结构工具 (显示 / 构建 / 分子 / 二聚体) 作为右侧可隐藏的分区面板
+        panel = SectionPanel(self, width=430)
+        panel.pack(side="right", fill="y", padx=(0, 6), pady=6)
+        self.panel = panel
         left = panel.inner
         self.plot = ViewerPanel(self, figsize=(7, 6))
-        self.plot.pack(side="left", fill="both", expand=True, padx=(4, 10), pady=10)
+        self.plot.pack(side="left", fill="both", expand=True, padx=(6, 4), pady=6)
         self.rend = self.plot.renderer
         S = safe(app)
         self._drag = None
@@ -524,7 +584,7 @@ class StructureTab(ttk.Frame):
         vf.pack(fill="x", pady=2)
         from .render import BACKGROUNDS, STYLES
         self.style_var = field(vf, 0, "样式", "球棍", values=list(STYLES), width=14)
-        self.bg_var = field(vf, 1, "背景", "深蓝渐变 (MedeA 风格)", values=list(BACKGROUNDS), width=14)
+        self.bg_var = field(vf, 1, "背景", "深蓝渐变", values=list(BACKGROUNDS), width=14)
         self.persp = tk.BooleanVar(value=True)
         ttk.Checkbutton(vf, text="透视", variable=self.persp, command=S(self.redraw)).grid(row=0, column=2, sticky="w")
         self.meas_mode = tk.BooleanVar(value=False)
@@ -534,8 +594,9 @@ class StructureTab(ttk.Frame):
         ttk.Button(vf, text="应用", command=S(self.redraw)).grid(row=1, column=2, sticky="we")
         vb = ttk.Frame(vf)
         vb.grid(row=2, column=0, columnspan=3, sticky="we")
-        for txt, vec in (("沿 a", 0), ("沿 b", 1), ("沿 c", 2), ("沿 x", "x"), ("沿 y", "y"), ("沿 z", "z")):
-            ttk.Button(vb, text=txt, width=5, command=S(lambda v=vec: self.view_along(v))).pack(side="left")
+        ttk.Label(vb, text="观察方向").pack(side="left", padx=(2, 6))
+        for txt, vec in (("a", 0), ("b", 1), ("c", 2), ("x", "x"), ("y", "y"), ("z", "z")):
+            ttk.Button(vb, text=txt, width=3, command=S(lambda v=vec: self.view_along(v))).pack(side="left")
         vb2 = ttk.Frame(vf)
         vb2.grid(row=3, column=0, columnspan=3, sticky="we")
         ttk.Button(vb2, text="重置视角", command=S(lambda: self.redraw(keep_view=False))).pack(side="left", fill="x",
@@ -687,6 +748,18 @@ class StructureTab(ttk.Frame):
             self.info.config(text=f"{Path(p).name}\n原子数 {len(self.atoms)}")
         self.app.current_structure = p
         self.app.log(f"已加载 {p}")
+        try:                                            # 主窗口标题栏：名称 · 化学式 · 空间群 · 晶胞
+            if self.mols is not None:
+                a, b, c, al, be, ga = self.crys["cell"]
+                f_ = formula(self.mols[0]["symbols"])
+                self.app.set_structure_title(f"{Path(p).stem}  ·  ({f_})×{len(self.mols)}  ·  "
+                                             f"{self.crys.get('spacegroup') or 'P?'}  ·  a={a:.3f} b={b:.3f} c={c:.3f} Å  "
+                                             f"α={al:.1f} β={be:.1f} γ={ga:.1f}°")
+            else:
+                self.app.set_structure_title(f"{Path(p).stem}  ·  {formula([x[0] for x in self.atoms])}  ·  "
+                                             f"{len(self.atoms)} {T('原子')}")
+        except Exception:  # noqa: BLE001
+            pass
         self.rebuild(keep_view=False)
 
     def build_scene(self):
@@ -780,7 +853,7 @@ class StructureTab(ttk.Frame):
         r.perspective = self.persp.get()
         r.show_h = self.show_h.get()
         r.labels = self.show_lab.get()
-        r.title = ("选中: " + ", ".join(self.scene[k]["label"] for k in self.sel)) if self.sel else ""
+        r.title = T("选中: " + ", ".join(self.scene[k]["label"] for k in self.sel)) if self.sel else ""
         if self.scene_bonds is None or (len(self.scene_bonds) and
                                                            self.scene_bonds.max() >= len(syms)):
             self.scene_bonds = self._scene_bonds()
@@ -878,7 +951,7 @@ class StructureTab(ttk.Frame):
             rows = _v
             self.app.data["strain_scan"] = rows
             mt.show_strain_scan(rows, self.scan_axis.get())
-            self.app.nb.select(mt)
+            self.app.show_page("迁移率")
         self.app.run_bg("应变扫描 (EHT → μ)…", _work, _done)
 
     # ---------------- 原子取代 ----------------
@@ -1095,9 +1168,7 @@ class StructureTab(ttk.Frame):
     def on_scroll(self, event):
         if event.inaxes is not self.plot.ax:
             return
-        self.rend.zoom *= 1.15 if event.button == "up" else 1 / 1.15
-        self.rend.draw()
-        self.plot.canvas.draw_idle()
+        self.plot.zoom(1.15 if event.button == "up" else 1 / 1.15)
 
     def pick_atom(self, x, y):
         return self.rend.pick(x, y)
@@ -1319,7 +1390,7 @@ class ReorgTab(ttk.Frame):
         super().__init__(parent, style="Bg.TFrame")
         self.app = app
         S = safe(app)
-        panel = ScrollPanel(self)
+        panel = SectionPanel(self)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         self.geom = FileEntry(left, "分子结构", filetypes=STRUCT_TYPES)
@@ -1417,7 +1488,7 @@ class DecompTab(ttk.Frame):
         self.app = app
         self.sets, self.res = None, None
         S = safe(app)
-        panel = ScrollPanel(self)
+        panel = SectionPanel(self)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         self.source = tk.StringVar(value="builtin")
@@ -1509,10 +1580,18 @@ class DecompTab(ttk.Frame):
         self.app.log(f"已自动填入 {d} 中的文件")
 
     def run(self):
+        """内置方法的 Hessian 分解较耗时：放到后台线程计算，完成后在界面线程显示。"""
+        if self.source.get() == "builtin":
+            fn, fi, sc = self.fn.get(), self.fi.get(), float(self.scale.get())
+            self.app.run_bg("重组能分解", lambda: decompose_reorg(fn, fi, sc), lambda res: self._run(res))
+            return
+        return self._run()
+
+    def _run(self, pre=None):
         t = self.text
         t.delete("1.0", "end")
         if self.source.get() == "builtin":
-            self.res = decompose_reorg(self.fn.get(), self.fi.get(), float(self.scale.get()))
+            self.res = pre if pre is not None else decompose_reorg(self.fn.get(), self.fi.get(), float(self.scale.get()))
             jm = self.res["duschinsky"]["matrix"]
             self.sets = {"neutral": dict(self.res["neutral"], duschinsky=jm.T),
                          "ion": dict(self.res["ion"], duschinsky=jm)}
@@ -1708,7 +1787,7 @@ class IPEATab(ttk.Frame):
         self.app = app
         self.result, self.orbitals = None, None
         S = safe(app)
-        panel = ScrollPanel(self)
+        panel = SectionPanel(self)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         ttk.Button(left, text="从重组能结果目录读取 7 个能量…", command=S(self.from_dir)).pack(fill="x")
@@ -1848,7 +1927,7 @@ class PhotoTab(ttk.Frame):
         self.app = app
         self.systems, self.current = [], None
         S = safe(app)
-        panel = ScrollPanel(self)
+        panel = SectionPanel(self)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         g = ttk.LabelFrame(left, text="生成 S0 / S1 / T1 计算 (TD-DFT)")
@@ -2055,7 +2134,7 @@ class TITab(ttk.Frame):
         super().__init__(parent, style="Bg.TFrame")
         self.app = app
         S = safe(app)
-        panel = ScrollPanel(self)
+        panel = SectionPanel(self)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         self.prog = tk.StringVar(value="gaussian")
@@ -2443,9 +2522,31 @@ class TITab(ttk.Frame):
             except Exception as exc:  # noqa: BLE001
                 self.app.log(f"自动填入迁移率表失败: {exc}")
 
+    def single_to_mobility(self):
+        """单个二聚体的计算结果 (EHT / ZINDO / Gaussian / ADF) 填入迁移率表：
+        表中已有路径时写入选中行 (未选则全部行) 的 Ve / Vh；表为空时按二聚体质心矢量新建一行。"""
+        last = self.app.data.get("last_J")
+        if not last:
+            raise ValueError("还没有转移积分结果：请先点“计算 / 读取转移积分”")
+        mt = self.app.mob_tab
+        if mt.tree.get_children():
+            mt.fill_last_j()
+            n = len(mt.tree.selection() or mt.tree.get_children())
+            self.app.log(f"转移积分已写入迁移率表的 {n} 行")
+        else:
+            a, b = self._dimer_atoms()
+            ca = np.mean([x[1:] for x in a], axis=0)
+            cb = np.mean([x[1:] for x in b], axis=0)
+            sc = mt._scale() / 1000.0
+            mt.set_paths([{"name": Path(self.dimer.get() or "dimer").stem, "vector": list(np.round(cb - ca, 4)),
+                           "Ve": abs(last["electron"]) * sc if last.get("electron") is not None else "",
+                           "Vh": abs(last["hole"]) * sc if last.get("hole") is not None else ""}])
+            self.app.log("已按二聚体质心矢量在迁移率表中新建一行 (晶体请用“结构”中的近邻矢量)")
+        self.app.show_page("迁移率")
+
     def compare_to_mobility(self):
         if not self.cmp_rows or not self.cmp_dir.get():
-            raise ValueError("请先对一个二聚体目录做三种方法对比")
+            return self.single_to_mobility()
         meth = self.fill_method.get()
         info = json.loads((Path(self.cmp_dir.get()) / "dimers.json").read_text())
         st = self.cmp_stats.get("Gaussian") or self.cmp_stats.get("ADF") or {}
@@ -2553,32 +2654,45 @@ class TITab(ttk.Frame):
         return read_geometry(self.ma.get()), read_geometry(self.mb.get())
 
     def _zindo(self, t):
+        """ZINDO/MOO：输入在界面线程读取，计算放到后台线程，结果回到界面线程显示。"""
         from .zindo import MOO, dimer_projection
         a_, b_ = self._dimer_atoms()
-        sa, sb = [x[0] for x in a_], [x[0] for x in b_]
-        if sa != sb:
-            from .polar import match_atoms
-            perm, _ = match_atoms(sa, np.array([x[1:] for x in a_]), sb, np.array([x[1:] for x in b_]))
-            b_ = [b_[k] for k in perm]
-        Xa, Xb = np.array([x[1:] for x in a_], float), np.array([x[1:] for x in b_], float)
         deg = float(self.deg.get() or 0) / 1000
-        moo = MOO(sa, Xa, self.z_orb.get() or None, degeneracy=deg)
-        from .morphology import kabsch_batch
-        _, _, rm = kabsch_batch(Xb[None], Xa)
-        j = moo.coupling_atoms(Xa, Xb)
-        jd = dimer_projection(sa, Xa, Xb, deg) if not self.z_orb.get() else None
-        t.insert("end", f"ZINDO/MOO 转移积分 (单体轨道：{moo.source})\n")
-        if rm[0] > 0.05:
-            t.insert("end", f"[提示] B 与 A 的几何不完全相同 (叠合 RMSD {rm[0]:.2f} Å)，MOO 按刚性单体处理\n")
-        t.insert("end", f"{'':<10}{'MOO J/meV':>12}" + (f"{'二聚体 INDO/S 投影':>16}" if jd else "") + "\n")
-        for car, lab in (("hole", "HOMO (空穴)"), ("electron", "LUMO (电子)")):
-            t.insert("end", f"{lab:<10}{1000 * j[car]:12.3f}" + (f"{1000 * jd[car]:16.3f}" if jd else "") + "\n")
-        if deg > 0:
-            t.insert("end", f"简并阈值 {deg * 1000:g} meV：空穴 {len(moo.levels('hole'))} 个、电子 "
-                            f"{len(moo.levels('electron'))} 个能级参与合并\n")
-        t.insert("end", "MOO 不做二聚体自洽场 (Kirkpatrick 2008)；与二聚体 INDO/S 投影相差通常在 10% 以内。"
-                        "定量结论请与 DFT 投影法核对。\n")
-        self.app.data["last_J"] = {"hole": 1000 * j["hole"], "electron": 1000 * j["electron"]}
+        zorb = self.z_orb.get() or None
+
+        def work():
+            sa, sb = [x[0] for x in a_], [x[0] for x in b_]
+            bb = b_
+            if sa != sb:
+                from .polar import match_atoms
+                perm, _ = match_atoms(sa, np.array([x[1:] for x in a_]), sb, np.array([x[1:] for x in b_]))
+                bb = [b_[k] for k in perm]
+            Xa, Xb = np.array([x[1:] for x in a_], float), np.array([x[1:] for x in bb], float)
+            moo = MOO(sa, Xa, zorb, degeneracy=deg)
+            from .morphology import kabsch_batch
+            _, _, rm = kabsch_batch(Xb[None], Xa)
+            j = moo.coupling_atoms(Xa, Xb)
+            jd = dimer_projection(sa, Xa, Xb, deg) if not zorb else None
+            return dict(source=moo.source, rm=rm[0], j=j, jd=jd,
+                        nlev={c: len(moo.levels(c)) for c in ("hole", "electron")})
+
+        def done(r):
+            j, jd = r["j"], r["jd"]
+            t.insert("end", f"ZINDO/MOO 转移积分 (单体轨道：{r['source']})\n")
+            if r["rm"] > 0.05:
+                t.insert("end", f"[提示] B 与 A 的几何不完全相同 (叠合 RMSD {r['rm']:.2f} Å)，MOO 按刚性单体处理\n")
+            t.insert("end", f"{'':<10}{'MOO J/meV':>12}" + (f"{'二聚体 INDO/S 投影':>16}" if jd else "") + "\n")
+            for car, lab in (("hole", "HOMO (空穴)"), ("electron", "LUMO (电子)")):
+                t.insert("end", f"{lab:<10}{1000 * j[car]:12.3f}" + (f"{1000 * jd[car]:16.3f}" if jd else "") + "\n")
+            if deg > 0:
+                t.insert("end", f"简并阈值 {deg * 1000:g} meV：空穴 {r['nlev']['hole']} 个、电子 "
+                                f"{r['nlev']['electron']} 个能级参与合并\n")
+            t.insert("end", "MOO 不做二聚体自洽场 (Kirkpatrick 2008)；与二聚体 INDO/S 投影相差通常在 10% 以内。"
+                            "定量结论请与 DFT 投影法核对。\n"
+                            "注意：ZINDO 的 J 是正交化轨道之间的耦合，可直接与 EHT 表中的 J_eff 比较；"
+                            "EHT 的 J_eff 对能量零点敏感，二者差别较大时以 DFT (Gaussian / ADF) 为准。\n")
+            self.app.data["last_J"] = {"hole": 1000 * j["hole"], "electron": 1000 * j["electron"]}
+        self.app.run_bg("ZINDO/MOO 转移积分", work, done)
 
     def _eht(self):
         from .eht import eht_from_file
@@ -2638,9 +2752,26 @@ class TITab(ttk.Frame):
             self._zindo(t)
             return
         if self.prog.get() == "eht":
-            res = self._eht()
-            for w in res["warnings"]:
+            if self.dimer.get() and not self.na.get():
+                self.auto_na(self.dimer.get())
+            from .eht import eht_from_file
+            orbs = [o.strip() for o in self.orbs.get().split(",") if o.strip()]
+            dimer, na, ma, mb = self.dimer.get(), self.na.get(), self.ma.get(), self.mb.get()   # 界面线程中读取输入
+
+            def work():
+                if dimer:
+                    return eht_from_file(dimer, int(na), orbitals=orbs)
+                return eht_from_file(mono_a=ma, mono_b=mb, orbitals=orbs)
+            self.app.run_bg("软件内 EHT 转移积分", work, self._show_eht)
+            return
+        return self._calc_dft(t)
+
+    def _show_eht(self, res):
+        t = self.text
+        t.delete("1.0", "end")
+        for w in res["warnings"]:
                 t.insert("end", f"[警告] {w}\n")
+        if True:
             t.insert("end", f"软件内 EHT 计算 ({res['nbf']} 个基函数)\n")
             t.insert("end", f"{'轨道':<9}{'J_eff/meV':>12}{'J/meV':>12}{'S_AB':>11}{'e_A/eV':>10}{'e_B/eV':>10}\n")
             for lab, r in res["results"].items():
@@ -2652,7 +2783,8 @@ class TITab(ttk.Frame):
                             "EHT 为半经验方法，建议用“三种方法对比”与 DFT 结果核对后再用于定量结论。\n")
             self.app.data["last_J"] = {"hole": res["results"]["HOMO"]["J_eff_meV"],
                                        "electron": res["results"]["LUMO"]["J_eff_meV"]}
-            return
+
+    def _calc_dft(self, t):
         if self.prog.get() == "gaussian":
             res = calc_transfer_integrals(self.fa.get(), self.fb.get(), self.fab.get(),
                                           [o.strip() for o in self.orbs.get().split(",") if o.strip()],
@@ -2679,7 +2811,7 @@ class TITab(ttk.Frame):
                                 f"{r.get('e1_eV', np.nan):10.4f}{r.get('e2_eV', np.nan):10.4f}\n")
             last = {"hole": res.get("hole", {}).get("V_meV"), "electron": res.get("electron", {}).get("V_meV")}
         t.insert("end", "\n空穴传输取 HOMO / hole，电子传输取 LUMO / electron。\n"
-                        "在“迁移率”页选中行后点“填入最近一次 J”即可使用。\n")
+                        "点“结果填入迁移率表”写入迁移率页 (表中已有路径时写入选中行)。\n")
         self.app.data["last_J"] = last
 
 
@@ -2696,7 +2828,7 @@ class MobilityTab(ttk.Frame):
         self.app = app
         self.compare, self.last = [], None
         S = safe(app)
-        panel = ScrollPanel(self, width=560)
+        panel = SectionPanel(self, width=560)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         p = ttk.LabelFrame(left, text="参数")
@@ -2707,11 +2839,15 @@ class MobilityTab(ttk.Frame):
         ttk.Label(p, text="(可写 300 或 200:400:20 或 250,300,350)", foreground=PALETTE["muted"]).grid(
             row=3, column=0, columnspan=2, sticky="w")
         self.plane = field(p, 0, "传输平面", "xy", values=["xy", "xz", "yz"], width=8, col=2)
+        try:                                       # 换传输平面时，表中由 x, y, z 给出的路径重新计算 r / θ / γ
+            self.plane.trace_add("write", lambda *a: self._refresh_angles())
+        except Exception:  # noqa: BLE001
+            pass
         self.unit = field(p, 1, "V 单位", "meV", values=["meV", "eV"], width=8, col=2)
         self.dim = field(p, 2, "维度 n", 3, values=["3", "2", "1"], width=8, col=2)
         self.dg = field(p, 4, "ΔG / eV", 0.0)
 
-        self.tree = EditableTree(left, self.COLS, widths=[70, 52, 52, 52, 56, 56, 44, 64, 64, 40], height=12)
+        self.tree = EditableTree(left, self.COLS, widths=[70, 52, 52, 52, 56, 56, 44, 64, 64, 40], height=7)
         self.tree.pack(fill="both", expand=True, pady=4)
         ttk.Label(left, text="双击编辑。θ 为平面内角度，γ 为与平面夹角；"
                              "只给 x,y,z 时 r/θ/γ 按“传输平面”自动计算。", foreground=PALETTE["muted"],
@@ -2782,8 +2918,28 @@ class MobilityTab(ttk.Frame):
     def _row(self, d):
         v = d.get("vector") or ["", "", ""]
         fmt = lambda x: "" if x in (None, "") else (f"{x:.4f}" if isinstance(x, float) else str(x))  # noqa: E731
-        return [d.get("name", ""), *(fmt(float(t)) if t != "" else "" for t in v), fmt(d.get("r")),
-                fmt(d.get("theta")), fmt(d.get("gamma")), fmt(d.get("Ve")), fmt(d.get("Vh")), d.get("count", 1)]
+        r, th, ga = d.get("r"), d.get("theta"), d.get("gamma")
+        if d.get("vector"):                       # 有 x, y, z 时 r / θ / γ 总按矢量与当前传输平面计算 (忽略文件中的旧值)
+            try:
+                r, th, ga = (float(t) for t in plane_angles([float(t) for t in v], self.plane.get()))
+            except Exception:  # noqa: BLE001
+                pass
+        return [d.get("name", ""), *(fmt(float(t)) if t != "" else "" for t in v), fmt(r),
+                fmt(th), fmt(ga), fmt(d.get("Ve")), fmt(d.get("Vh")), d.get("count", 1)]
+
+    def _refresh_angles(self):
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+        try:
+            for iid in tree.get_children():
+                vals = list(tree.item(iid, "values"))
+                if all(str(t).strip() for t in vals[1:4]):
+                    r, th, ga = plane_angles([float(t) for t in vals[1:4]], self.plane.get())
+                    vals[4:7] = [f"{r:.4f}", f"{th:.4f}", f"{ga:.4f}"]
+                    tree.item(iid, values=vals)
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_paths(self, paths):
         self.tree.clear()
@@ -2899,10 +3055,7 @@ class MobilityTab(ttk.Frame):
             if x and y and z:
                 vec = [float(x), float(y), float(z)]
                 d["vector"] = vec
-                r0, th0, ga0 = plane_angles(vec, self.plane.get())
-                d["r"] = float(r) if r else r0
-                d["theta"] = float(th) if th else th0
-                d["gamma"] = float(ga) if ga else ga0
+                d["r"], d["theta"], d["gamma"] = (float(t) for t in plane_angles(vec, self.plane.get()))
             else:
                 if not r:
                     raise ValueError(f"路径 {name} 缺少 r 或 x,y,z")
@@ -3041,7 +3194,7 @@ class MobilityTab(ttk.Frame):
             t = self.text
             t.delete("1.0", "end")
             t.insert("end", "KMC 精度自检：与精确解逐项比较\n" + format_rows(rows) + "\n")
-            t.insert("end", "精确解：布拉维格子 μ = Σ k r r / 2kT；多分子晶胞为各位点平均；"
+            t.insert("end", "精确解：布拉维格子 μ = Σ k r r / 2kT；多分子晶胞为周期格子均匀化解 (修正位移 χ)；"
                             "能量无序为一维环 Derrida 精确解的 Boltzmann 系综平均\n")
             ax = self.plot.new_axes()
             figure(rows, ax=ax)
@@ -3242,7 +3395,7 @@ class AdvancedTab(ttk.Frame):
         self.app = app
         self.dyn, self.vib_sets, self.vib_last = None, [], None
         S = safe(app)
-        panel = ScrollPanel(self, width=470)
+        panel = SectionPanel(self, width=470)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         c = ttk.LabelFrame(left, text="数据来源")
@@ -3579,7 +3732,7 @@ class CompareTab(ttk.Frame):
         self.app = app
         self.result = None
         S = safe(app)
-        panel = ScrollPanel(self, width=470)
+        panel = SectionPanel(self, width=470)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
 
@@ -3778,7 +3931,7 @@ class PolarTab(ttk.Frame):
         self.app = app
         self.res, self.md, self.levels, self.ce = None, None, None, None
         S = safe(app)
-        panel = ScrollPanel(self, width=470)
+        panel = SectionPanel(self, width=470)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
 
@@ -4014,7 +4167,7 @@ class MorphTab(ttk.Frame):
         self.app = app
         self.m, self.kres = None, {}
         S = safe(app)
-        panel = ScrollPanel(self, width=470)
+        panel = SectionPanel(self, width=470)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
 
@@ -4297,7 +4450,7 @@ class InteractionTab(ttk.Frame):
         self.app = app
         self.energies, self.method_label = {}, ""
         S = safe(app)
-        panel = ScrollPanel(self, width=450)
+        panel = SectionPanel(self, width=450)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         c = ttk.LabelFrame(left, text="数据来源")
@@ -4361,22 +4514,22 @@ class InteractionTab(ttk.Frame):
         top = ttk.Frame(right, style="Bg.TFrame")
         top.pack(fill="both", expand=True)
         self.view = ViewerPanel(top, figsize=(4.6, 4.2))
-        self.view.pack(side="left", fill="both", expand=True)
+        self.view.grid(row=0, column=0, sticky="nsew")
         self.plot = PlotPanel(top, figsize=(4.2, 4.2))
-        self.plot.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        self.plot.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        top.columnconfigure((0, 1), weight=1, uniform="half")          # 结构图与能量图各占一半，不互相挤压
+        top.rowconfigure(0, weight=1)
         self.view.canvas.mpl_connect("scroll_event", self._scroll)
         self.view.canvas.mpl_connect("button_press_event", self._press)
         self.view.canvas.mpl_connect("motion_notify_event", self._motion)
-        self.view.canvas.mpl_connect("button_release_event", lambda e: setattr(self, "_drag", None))
+        self.view.canvas.mpl_connect("button_release_event", self._release)
         self._drag = None
         self.text = styled_text(right, app.mono, height=12, wrap="none", size=9)
         self.text.pack(fill="x", pady=(8, 0))
 
     # ---- 视图交互 ----
     def _scroll(self, e):
-        self.view.renderer.zoom *= 1.15 if e.button == "up" else 1 / 1.15
-        self.view.renderer.draw()
-        self.view.canvas.draw_idle()
+        self.view.zoom(1.15 if e.button == "up" else 1 / 1.15)
 
     def _press(self, e):
         self._drag = (e.x, e.y) if e.x is not None else None
@@ -4389,6 +4542,12 @@ class InteractionTab(ttk.Frame):
         self.view.renderer.rotate(dx, dy)
         self.view.renderer.draw(fast=True)
         self.view.canvas.draw_idle()
+
+    def _release(self, e):
+        if self._drag:
+            self._drag = None
+            self.view.renderer.draw()             # 松开鼠标后恢复完整绘制
+            self.view.canvas.draw_idle()
 
     # ---- 计算 ----
     def _auto_na(self, p):
@@ -4617,7 +4776,7 @@ class SurrogateTab(ttk.Frame):
         self.records, self.sources, self.model, self.valres, self.best = [], [], None, None, None
         self.monomer = None
         S = safe(app)
-        panel = ScrollPanel(self, width=460)
+        panel = SectionPanel(self, width=460)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
 
@@ -5166,7 +5325,7 @@ class WavefunctionTab(ttk.Frame):
         self.app = app
         self.wfn, self.cube, self.esp, self.charges, self.nbo = None, None, None, None, None
         S = safe(app)
-        panel = ScrollPanel(self, width=460)
+        panel = SectionPanel(self, width=460)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
         f = ttk.LabelFrame(left, text="Gaussian 波函数 (fchk)")
@@ -5288,8 +5447,7 @@ class WavefunctionTab(ttk.Frame):
 
     # ---- 视图 ----
     def _scroll(self, e):
-        self.view.renderer.zoom *= 1.15 if e.button == "up" else 1 / 1.15
-        self._draw()
+        self.view.zoom(1.15 if e.button == "up" else 1 / 1.15)
 
     def _press(self, e):
         self._drag = (e.x, e.y) if e.x is not None else None
@@ -5794,7 +5952,7 @@ class ScanTab(ttk.Frame):
         self.app = app
         self.proj = None
         S = safe(app)
-        panel = ScrollPanel(self, width=470)
+        panel = SectionPanel(self, width=470)
         panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
         left = panel.inner
 
@@ -6480,8 +6638,9 @@ class ScanTab(ttk.Frame):
         from .ceds import EHTSurface, surfaces_from_project
         src = self.CE_SRC.index(self.ce_src.get())
         if src == 1:
-            s = EHTSurface(ce.sym, ce.Y)
-            return {p["gid"]: s for p in ce.pairs}, {p["gid"]: s.describe() for p in ce.pairs}
+            s = {m: EHTSurface(ce.sym, ce.Y, mirror=m) for m in (False, True)}
+            return ({p["gid"]: s[bool(p.get("mirror"))] for p in ce.pairs},
+                    {p["gid"]: s[False].describe() for p in ce.pairs})
         if src == 2:
             from .ceds import combined_surfaces, local_surfaces_from_csv, product_surfaces
             g, f, lc = self.ce_gcsv.get(), self.ce_fdx.get(), self.ce_lcsv.get()
@@ -6928,7 +7087,7 @@ class RunDialog(tk.Toplevel):
             self.load()
         self.detect(quiet=True)
         self.detect_ams(quiet=True)
-        self.after(400, self.poll)
+        self._after = self.after(400, self.poll)
 
     def detect(self, quiet=False):
         info = find_gaussian(self.exe.get() or None)
@@ -7183,14 +7342,70 @@ class RunDialog(tk.Toplevel):
                         self.write(ex)
         self.batch_progress()
         try:
-            self.after(400, self.poll)
+            self._after = self.after(400, self.poll)
         except Exception:  # noqa: BLE001
             pass
+
+    def destroy(self):
+        try:
+            self.after_cancel(self._after)
+        except Exception:  # noqa: BLE001
+            pass
+        super().destroy()
 
 
 # ==============================================================================================
 # 主窗口
 # ==============================================================================================
+class FunctionWindow(tk.Toplevel):
+    """功能窗口：由菜单打开，窗口内左侧为分区标签页，右侧为图与结果；关闭时只隐藏，保留已填的设置与结果。"""
+
+    def __init__(self, app, name):
+        super().__init__(app)
+        self.app, self.name = app, name
+        self.title(f"{T(name)} — {APP_NAME}")
+        App.set_icon(self)
+        try:
+            from .theme import px
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            w, h = min(px(1320), int(sw * 0.92)), min(px(840), int(sh * 0.88))
+            self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+            self.configure(background=PALETTE["bg"])
+            self.transient(app)
+        except Exception:  # noqa: BLE001
+            pass
+        head = ttk.Frame(self, style="PageHead.TFrame", padding=(14, 8, 14, 2))
+        head.pack(fill="x")
+        grp = next((g for g, pages in App.NAV if name in pages), "")
+        ttk.Label(head, text=f"{T(grp)}  ›  {T(name)}" if grp else name, style="PageCrumb.TLabel").pack(anchor="w")
+        self.title_lbl = ttk.Label(head, text=name, style="PageTitle.TLabel")
+        self.title_lbl.pack(anchor="w")
+        ttk.Label(head, text=App.PAGE_INFO.get(name, ""), style="PageDesc.TLabel").pack(anchor="w")
+        self.body = ttk.Frame(self, style="Bg.TFrame")
+        self.body.pack(fill="both", expand=True)
+        self.protocol("WM_DELETE_WINDOW", self.withdraw)
+        self.bind("<Escape>", lambda e: self.withdraw())
+
+    def set_subtitle(self, text):
+        self.title_lbl.configure(text=text)
+        self.title(f"{T(text)} — {APP_NAME}")
+
+
+def section_panel(tab):
+    """功能页中的分区面板 (SectionPanel)。"""
+    from .theme import SectionPanel as _SP
+    stack = [tab]
+    while stack:
+        w = stack.pop()
+        if isinstance(w, _SP):
+            return w
+        try:
+            stack += list(w.winfo_children())
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 class App(tk.Tk):
     STEPS = ["结构/晶体", "重组能", "IP/EA", "分解/黄昆因子", "激发态/光谱", "转移积分", "迁移率", "输运理论与光物理扩展",
              "分子间相互作用能", "耦合代理模型与堆积设计", "波函数分析", "批量扫描工作流", "极化位点能", "无定形形貌 (MD)",
@@ -7201,7 +7416,7 @@ class App(tk.Tk):
            ("迁移率", ["迁移率", "极化位点能", "无定形形貌 (MD)", "输运理论与光物理扩展", "迁移率方法对比"])]
     PAGE_INFO = {
         "结构/晶体": "打开分子或晶体 (CIF)，搜索近邻二聚体，软件内 EHT 计算全部二聚体的转移积分，原子 / 基团取代",
-        "分子间相互作用能": "二聚体结合能 (UFF / xtb / Gaussian 抵消校正)、能量框架与晶格能",
+        "分子间相互作用能": "二聚体结合能 (UFF / Gaussian 抵消校正)、能量框架与晶格能",
         "重组能": "四点法重组能：生成 Gaussian 输入并解析结果",
         "IP/EA": "电离势、电子亲和势、空穴 / 电子抽取势与前线轨道",
         "分解/黄昆因子": "重组能按简正模式、内坐标与原子分解；黄昆因子与 Duschinsky 矩阵",
@@ -7217,6 +7432,9 @@ class App(tk.Tk):
         "迁移率方法对比": "同一套 J、λ、σ 输入下比较全部迁移率模型，并按输运区间判断各模型的适用性",
     }
 
+    # 功能页 → (属性名, 类)；除“结构/晶体”外都在首次使用时创建 (启动更快)
+    TAB_CLASSES = {}
+
     def __init__(self):
         super().__init__()
         self.config_data = load_config()
@@ -7226,46 +7444,20 @@ class App(tk.Tk):
         from . import theme as _theme
         _theme.TRANSLATOR = T
         self.restart = False
-        self.title(f"{APP_NAME} · {T(APP_CN)} — {T(APP_SUBTITLE)}")
+        _theme.set_theme(self.config_data.get("theme", "专业浅色"))
+        self.title(f"{APP_NAME} · {T(APP_CN)}  v{__version__}")
         self.set_icon(self)
-        self.geometry("1440x900")
-        self.minsize(1100, 700)
         self.ui, self.mono = apply_theme(self, float(self.config_data.get("font_scale", 1.0)))
+        try:
+            from .theme import px
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry(f"{min(px(1480), int(sw * 0.94))}x{min(px(920), int(sh * 0.9))}")
+        except Exception:  # noqa: BLE001
+            self.geometry("1440x900")
+        self.minsize(900, 600)
         self.data = {}
         self.current_structure = None
-
-        header = ttk.Frame(self, style="Header.TFrame", padding=(12, 6))
-        header.pack(fill="x")
-        # 左上角: 图标 + 名称 (两行) —— 点击图标或名称显示“关于”
-        ttk.Button(header, text="☰", style="Chip.TButton", width=3,
-                   command=self.toggle_nav).pack(side="left", padx=(0, 10))
-        brand = ttk.Frame(header, style="Header.TFrame")
-        brand.pack(side="left")
-        self._logo_small = None
-        try:
-            from .theme import SCALE as _sc
-            src = Path(__file__).resolve().parent / "assets" / ("mobilis_64.png" if _sc >= 1.25 else "mobilis_48.png")
-            self._logo_small = tk.PhotoImage(file=str(src))
-            logo = ttk.Label(brand, image=self._logo_small, style="Header.TLabel", cursor="hand2")
-            logo.grid(row=0, column=0, rowspan=2, padx=(0, 10))
-            logo.bind("<Button-1>", lambda e: self.about())
-        except Exception:  # noqa: BLE001
-            pass
-        line1 = ttk.Frame(brand, style="Header.TFrame")
-        line1.grid(row=0, column=1, sticky="sw")
-        ttk.Label(line1, text=APP_NAME, style="Title.TLabel").pack(side="left")
-        ttk.Label(line1, text=" " + T(APP_CN), style="Brand.TLabel").pack(side="left")
-        ttk.Label(brand, text=f"{T(APP_SUBTITLE)}  ·  v{__version__}  ·  {__author__}", style="Subtitle.TLabel").grid(
-            row=1, column=1, sticky="nw")
-        ttk.Frame(header, style="HeaderSep.TFrame", width=1).pack(side="left", fill="y", padx=16, pady=4)
-        ttk.Button(header, text="English" if i18n.LANG == "zh" else "中文", style="Chip.TButton",
-                   command=self.toggle_lang).pack(side="right", padx=(0, 4))
-        ttk.Button(header, text="A+", style="Chip.TButton", width=3,
-                   command=lambda: self.change_font(+1)).pack(side="right", padx=(0, 2))
-        ttk.Button(header, text="A−", style="Chip.TButton", width=3,
-                   command=lambda: self.change_font(-1)).pack(side="right", padx=(0, 2))
-        ttk.Button(header, text="▶ 运行任务", style="Accent.TButton",
-                   command=lambda: self.open_runner()).pack(side="right", padx=(0, 14))
+        self._tabs, self._wins = {}, {}
         self.page_var = MappedVar(self.STEPS[0], {p: T(p) for p in self.STEPS})
 
         sbar = ttk.Frame(self, style="Card.TFrame")
@@ -7275,87 +7467,170 @@ class App(tk.Tk):
         self.status = ttk.Label(sbar, text="就绪", style="Status.TLabel", anchor="w")
         self.status.pack(side="left", fill="x", expand=True)
         self._busy = None
-        body = ttk.Frame(self, style="Bg.TFrame")
-        body.pack(fill="both", expand=True)
-        self._build_nav(body)
-        main = ttk.Frame(body, style="Bg.TFrame")
-        main.pack(side="left", fill="both", expand=True)
-        self._main = main
-        if self.config_data.get("nav_hidden"):
-            self.nav.pack_forget()
-        head = ttk.Frame(main, style="PageHead.TFrame", padding=(14, 8, 14, 0))
-        head.pack(fill="x")
-        self.page_crumb = ttk.Label(head, text="", style="PageCrumb.TLabel")
-        self.page_crumb.pack(anchor="w")
-        self.page_title = ttk.Label(head, text="", style="PageTitle.TLabel")
-        self.page_title.pack(anchor="w")
-        self.page_desc = ttk.Label(head, text="", style="PageDesc.TLabel")
-        self.page_desc.pack(anchor="w")
-        pw = ttk.PanedWindow(main, orient="vertical")
+        self.toolbar = ttk.Frame(self, style="Toolbar.TFrame", padding=(4, 3))
+        self.toolbar.pack(fill="x")
+        self.struct_bar = ttk.Label(self, text=T("未加载结构 —— 文件 → 打开结构"), style="StructBar.TLabel", anchor="w")
+        self.struct_bar.pack(fill="x")
+        pw = ttk.PanedWindow(self, orient="vertical")
         pw.pack(fill="both", expand=True)
-        self.nb = ttk.Notebook(pw, style="Hidden.TNotebook")
+        self.struct_tab = StructureTab(pw, self)
+        self._tabs["结构/晶体"] = self.struct_tab
         self.logbox = styled_text(pw, self.mono, dark=True, height=5, size=9)
-        pw.add(self.nb, weight=6)
+        pw.add(self.struct_tab, weight=8)
         pw.add(self.logbox, weight=1)
-        self.struct_tab = StructureTab(self.nb, self)
-        self.reorg_tab = ReorgTab(self.nb, self)
-        self.ipea_tab = IPEATab(self.nb, self)
-        self.decomp_tab = DecompTab(self.nb, self)
-        self.photo_tab = PhotoTab(self.nb, self)
-        self.ti_tab = TITab(self.nb, self)
-        self.mob_tab = MobilityTab(self.nb, self)
-        self.adv_tab = AdvancedTab(self.nb, self)
-        self.inter_tab = InteractionTab(self.nb, self)
-        self.sur_tab = SurrogateTab(self.nb, self)
-        self.wfn_tab = WavefunctionTab(self.nb, self)
-        self.scan_tab = ScanTab(self.nb, self)
-        self.pol_tab = PolarTab(self.nb, self)
-        self.morph_tab = MorphTab(self.nb, self)
-        self.cmp_tab = CompareTab(self.nb, self)
-        self.tabs = [self.struct_tab, self.reorg_tab, self.ipea_tab, self.decomp_tab, self.photo_tab, self.ti_tab,
-                     self.mob_tab, self.adv_tab, self.inter_tab, self.sur_tab, self.wfn_tab, self.scan_tab, self.pol_tab,
-                     self.morph_tab, self.cmp_tab]
-        for tab, name in zip(self.tabs, self.STEPS):
-            self.nb.add(tab, text=name)
-        self.build_menu()
-        self.show_page(self.STEPS[0])
-        self.log("欢迎使用。用左侧导航或顶部菜单切换功能；程序位置在 工具 → 程序路径设置 中指定")
-
-    def _build_nav(self, parent):
-        """左侧导航：按 结构 → 单分子性质 → 电子耦合 → 迁移率 分组。"""
-        width = 200
-        try:                                    # 宽度按最长的页面名确定，避免文字被截断
-            import tkinter.font as tkfont
-            f = tkfont.Font(font=ttk.Style().lookup("Nav.TButton", "font"))
-            width = max(width, max(f.measure(T(pg)) for _, pages in self.NAV for pg in pages) + 48)
+        try:                                            # 结构面板顶部的“打开文件 / 说明”已由工具栏与标题栏代替
+            self.struct_tab.panel.header.pack_forget()
+            self.status.configure(text="  " + T("鼠标: 左/右键拖动旋转 · 滚轮缩放 · 中键平移 · 左键单击选分子 (Ctrl/Shift 多选)"))
         except Exception:  # noqa: BLE001
             pass
-        nav = ttk.Frame(parent, style="Nav.TFrame", width=width)
-        nav.pack(side="left", fill="y")
-        nav.pack_propagate(False)
-        self.nav = nav
-        self.nav_buttons = {}
-        for group, pages in self.NAV:
-            ttk.Label(nav, text=group, style="NavGroup.TLabel").pack(fill="x")
-            for pg in pages:
-                row = ttk.Frame(nav, style="Nav.TFrame")
-                row.pack(fill="x")
-                mark = ttk.Frame(row, style="NavBlank.TFrame", width=4)
-                mark.pack(side="left", fill="y")
-                b = ttk.Button(row, text=pg, style="Nav.TButton", command=lambda p=pg: self.show_page(p))
-                b.pack(side="left", fill="x", expand=True)
-                self.nav_buttons[pg] = (b, mark)
+        self._build_toolbar()
+        self.build_menu()
+        if self.config_data.get("nav_hidden"):
+            self.toggle_nav(False)
+        self.after_idle(self._reflow_panels)
+        self.log("欢迎使用。文件 → 打开结构；计算从 Gaussian / ADF / 迁移率 菜单开始，结果在 分析 菜单中读取；"
+                 "程序位置在 任务 → 程序路径设置 中指定")
+
+    # ---------------- 功能窗口 ----------------
+    def _get_tab(self, name):
+        tab = self._tabs.get(name)
+        if tab is not None:
+            return tab
+        attr, cls = self.TAB_CLASSES[name]
+        win = FunctionWindow(self, name)
+        tab = cls(win.body, self)
+        tab.pack(fill="both", expand=True)
+        self._tabs[name], self._wins[name] = tab, win
+        try:
+            win.withdraw()
+            sp = section_panel(tab)
+            if sp is not None:
+                self.after_idle(sp.reflow)
+        except Exception:  # noqa: BLE001
+            pass
+        return tab
+
+    @property
+    def tabs(self):
+        return [self._get_tab(n) for n in self.STEPS]
+
+    def show_page(self, name, section=None, subtitle=None):
+        """打开功能窗口 (或主窗口的结构面板)，可选切换到某个分区标签页。"""
+        tab = self._get_tab(name)
+        self.page_var.set(name)
+        if name == "结构/晶体":
+            self.toggle_nav(True)
+            sp = self.struct_tab.panel
+            win = None
+        else:
+            win = self._wins[name]
+            sp = section_panel(tab)
+            try:
+                win.set_subtitle(subtitle or name)
+                win.deiconify()
+                win.lift()
+                win.focus_set()
+            except Exception:  # noqa: BLE001
+                pass
+        if section is not None and sp is not None:
+            sp.select(section)
+        return tab
+
+    def open_ti(self, prog):
+        """转移积分窗口，按菜单预选程序 (gaussian / adf / eht / zindo)。"""
+        names = {"gaussian": "转移积分 — Gaussian 二聚体投影法", "adf": "转移积分 — ADF 片段法",
+                 "eht": "转移积分 — 软件内 EHT", "zindo": "转移积分 — 软件内 ZINDO/MOO"}
+        tab = self.show_page("转移积分", subtitle=names.get(prog))
+        tab.prog.set(prog)
+        return tab
+
+    def open_run_gaussian(self, calc=None):
+        from .gui_run import RunGaussianDialog
+        return RunGaussianDialog.open(self, calc)
+
+    def open_flow(self):
+        from .gui_flow import FlowWindow
+        return FlowWindow.open(self)
+
+    def open_run_adf(self, calc=None):
+        from .gui_run import RunADFDialog
+        return RunADFDialog.open(self, calc)
+
+    def set_structure_title(self, text):
+        self.struct_bar.configure(text=text)
+        self.title(f"{APP_NAME} · {T(APP_CN)}  v{__version__}  —  {text.split('  ·')[0]}")
+
+    def _reflow_panels(self):
+        """分区面板：过宽的横排控件折行，面板宽度随内容调整 (英文界面 / 高分屏)。"""
+        from .theme import _PANELS
+        for ref in list(_PANELS):
+            p = ref()
+            if p is not None:
+                p.reflow()
 
     def toggle_nav(self, show=None):
-        """显示 / 隐藏左侧导航栏 (Ctrl+B)；状态记入配置，下次启动保持。"""
-        visible = bool(self.nav.winfo_manager())
+        """显示 / 隐藏主窗口右侧的结构面板 (Ctrl+B)；状态记入配置，下次启动保持。"""
+        panel = self.struct_tab.panel
+        visible = bool(panel.winfo_manager())
         show = (not visible) if show is None else show
         if show and not visible:
-            self.nav.pack(side="left", fill="y", before=self._main)
+            panel.pack(side="right", fill="y", padx=(0, 6), pady=6, before=self.struct_tab.plot)
         elif not show and visible:
-            self.nav.pack_forget()
+            panel.pack_forget()
         self.config_data["nav_hidden"] = not show
         save_config(self.config_data)
+        try:
+            self._panel_var.set(bool(show))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _build_toolbar(self):
+        st, tb = self.struct_tab, self.toolbar
+        S = safe(self)
+
+        def btn(text, cmd, tip=None):
+            b = ttk.Button(tb, text=text, style="Tool.TButton", command=S(cmd), width=0)   # 宽度随文字
+            b.pack(side="left", padx=1)
+            if tip:
+                from .theme import ToolTip
+                ToolTip(b, T(tip))
+            return b
+
+        def sep():
+            ttk.Frame(tb, style="ToolSep.TFrame", width=1).pack(side="left", fill="y", padx=6, pady=2)
+
+        btn("打开", lambda: st.open_file(), "打开结构 / 晶体 (xyz / gjf / log / fchk / cif)   Ctrl+O")
+        btn("图片", st.save_image, "保存高清结构图   Ctrl+S")
+        sep()
+        for ax_, v in (("a", 0), ("b", 1), ("c", 2)):
+            btn(ax_, lambda v=v: st.view_along(v), f"沿 {ax_} 轴观察")
+        btn("复位", lambda: st.redraw(keep_view=False), "重置视角")
+        sep()
+        for txt, var, cmd, tip in (("测量", st.meas_mode, st.toggle_measure, "测量：依次点 2 / 3 / 4 个原子"),
+                                   ("取代", st.sub_mode, st.toggle_sub, "原子取代模式：点击要取代的原子")):
+            c = ttk.Checkbutton(tb, text=txt, variable=var, style="Tool.Toolbutton", command=S(cmd), width=0)
+            c.pack(side="left", padx=1)
+            from .theme import ToolTip
+            ToolTip(c, T(tip))
+        self._panel_var = tk.BooleanVar(value=True)
+        c = ttk.Checkbutton(tb, text="结构面板", variable=self._panel_var, style="Tool.Toolbutton", width=0,
+                            command=lambda: self.toggle_nav(self._panel_var.get()))
+        c.pack(side="left", padx=1)
+        sep()
+        btn("近邻二聚体", lambda: (self.show_page("结构/晶体", section="晶体二聚体"), st.search()),
+            "搜索近邻二聚体并按对称等价分组")
+        btn("EHT → μ", st.eht_all, "软件内 EHT 计算全部二聚体转移积分并填入迁移率表")
+        sep()
+        btn("Gaussian…", self.open_run_gaussian, "运行 Gaussian (重组能 / 激发态 / 转移积分 / 抵消校正 / ESP …)   Ctrl+G")
+        btn("ADF…", self.open_run_adf, "运行 ADF (片段法转移积分 / 晶体二聚体批处理)")
+        btn("迁移率…", lambda: self.show_page("迁移率"), "Marcus / KMC / 三维迁移率")
+        sep()
+        btn("流程图", self.open_flow, "流程图：把优化 → 重组能 → 转移积分 → 迁移率等多个阶段串成一个任务运行   Ctrl+L")
+        btn("▶ 任务", lambda: self.open_runner(), "任务管理器：运行 / 停止 / 查看 Gaussian 与 ADF 任务   Ctrl+J")
+        ttk.Button(tb, text="English" if i18n.LANG == "zh" else "中文", style="Tool.TButton",
+                   command=self.toggle_lang).pack(side="right", padx=2)
+        ttk.Button(tb, text="A+", style="Tool.TButton", width=3, command=lambda: self.change_font(+1)).pack(side="right")
+        ttk.Button(tb, text="A−", style="Tool.TButton", width=3, command=lambda: self.change_font(-1)).pack(side="right")
 
     sync = False          # 测试时设为 True：后台任务同步执行
 
@@ -7423,82 +7698,181 @@ class App(tk.Tk):
                 messagebox.showerror(T("出错了"), str(exc))
         self.after(80, poll)
 
-    def show_page(self, name):
-        tab = self.tabs[self.STEPS.index(name)]
-        self.nb.select(tab)
-        self.page_var.set(name)
-        for pg, (b, mark) in getattr(self, "nav_buttons", {}).items():
-            on = pg == name
-            b.configure(style="NavActive.TButton" if on else "Nav.TButton")
-            mark.configure(style="NavMark.TFrame" if on else "NavBlank.TFrame")
-        if hasattr(self, "page_title"):
-            grp = next((g for g, pages in self.NAV if name in pages), "")
-            self.page_crumb.configure(text=f"{grp}  ›  {name}" if grp else name)
-            self.page_title.configure(text=name)
-            self.page_desc.configure(text=self.PAGE_INFO.get(name, ""))
-
     def build_menu(self):
+        """菜单：文件 / 编辑 / 构建 / 视图 / Gaussian / ADF / 迁移率 / 分析 / 任务 / 窗口 / 帮助。"""
         from .render import BACKGROUNDS, STYLES
         m = tk.Menu(self)
         st = self.struct_tab
+        S = safe(self)
 
-        def sub(label, items):
+        def menu(label):
             mm = tk.Menu(m, tearoff=0)
-            for it in items:
-                if it is None:
-                    mm.add_separator()
-                elif isinstance(it[1], list):
-                    s2 = tk.Menu(mm, tearoff=0)
-                    for lab2, cmd2 in it[1]:
-                        s2.add_command(label=T(lab2), command=cmd2)
-                    mm.add_cascade(label=T(it[0]), menu=s2)
-                else:
-                    mm.add_command(label=T(it[0]), command=safe(self)(it[1]))
             m.add_cascade(label=T(label), menu=mm)
             return mm
-        go = lambda n: (lambda: self.show_page(n))  # noqa: E731
-        fm = sub("文件", [("打开结构 / 晶体 (CIF)…", lambda: (self.show_page("结构/晶体"), st.open_file())),
-                   ("设置工作目录…", self.set_workdir), None,
-                   ("保存结构图片…", st.save_image), ("整个场景另存为 xyz…", st.save_xyz), None, ("退出", self.destroy)])
-        sub("结构", [("结构 / 晶体显示", go("结构/晶体")), ("搜索近邻二聚体", st.search),
-                   ("软件内计算全部二聚体 J (EHT)", st.eht_all), ("应变扫描 (EHT → μ)", st.strain_scan)])
-        sub("计算", [("重组能 (四点法)", go("重组能")), ("IP / EA / 前线轨道", go("IP/EA")),
-                   ("激发态 / 光谱", go("激发态/光谱")), ("转移积分", go("转移积分")), ("迁移率 / KMC", go("迁移率")),
-                   ("极化位点能 (固态 IE/EA、σ_E)", go("极化位点能")),
-                   ("无定形形貌 (GROMACS → KMC)", go("无定形形貌 (MD)")), ("迁移率方法对比", go("迁移率方法对比"))])
-        sub("分析", [("重组能分解 / 黄昆因子", go("分解/黄昆因子")), ("三种方法对比 (转移积分)", go("转移积分")),
-                   ("输运理论与光物理扩展", go("输运理论与光物理扩展")),
-                   ("分子间相互作用能 / 能量框架", go("分子间相互作用能")),
-                   ("耦合代理模型与堆积设计", go("耦合代理模型与堆积设计")),
-                   ("批量扫描工作流 (网格 / 验证 / 相互作用能 / 报告)", go("批量扫描工作流")),
-                   ("波函数分析 (轨道 / 电荷 / ESP / NBO)", go("波函数分析"))])
-        sub("视图", [("显示 / 隐藏导航栏  Ctrl+B", lambda: self.toggle_nav()), None, ("显示样式", [(k, (lambda k=k: (st.style_var.set(k), st.redraw()))) for k in STYLES]),
-                   ("背景", [(k, (lambda k=k: (st.bg_var.set(k), st.redraw()))) for k in BACKGROUNDS]),
-                   None, ("沿 a 观察", lambda: st.view_along(0)), ("沿 b 观察", lambda: st.view_along(1)),
-                   ("沿 c 观察", lambda: st.view_along(2)), ("重置视角", lambda: st.redraw(keep_view=False))])
-        sub("字体", [(f"{k} ({int(v * 100)}%)", (lambda v=v: self.set_font_scale(v))) for k, v in FONT_SCALES.items()]
-            + [None, ("放大  Ctrl +", lambda: self.change_font(+1)), ("缩小  Ctrl −", lambda: self.change_font(-1)),
-               ("恢复标准  Ctrl 0", lambda: self.set_font_scale(1.0))])
-        sub("工具", [("▶ 运行任务…", lambda: self.open_runner()), ("程序路径设置…", lambda: ProgramsDialog(self))])
-        sub("语言", [("中文", lambda: self.set_lang("zh")), ("English", lambda: self.set_lang("en"))])
-        sub("帮助", [("关于", self.about), ("开发者信息", self.about), ("引用文献…", lambda: CitationDialog(self))])
-        # 最近打开 (每次展开时刷新)
-        try:
-            rec = tk.Menu(fm, tearoff=0, postcommand=lambda: self._fill_recent(rec))
-            fm.insert_cascade(2, label=T("最近打开"), menu=rec)
-            self._recent_menu = rec
-        except Exception:  # noqa: BLE001
-            pass
+
+        def cmd(mm, label, fn, accel=None):
+            mm.add_command(label=T(label), command=S(fn), accelerator=accel or "")
+
+        def cascade(mm, label):
+            s2 = tk.Menu(mm, tearoff=0)
+            mm.add_cascade(label=T(label), menu=s2)
+            return s2
+
+        page = lambda n, sec=None: (lambda: self.show_page(n, section=sec))  # noqa: E731
+        panel = lambda sec: (lambda: self.show_page("结构/晶体", section=sec))  # noqa: E731
+
+        # 文件
+        fm = menu("文件")
+        cmd(fm, "打开结构 / 晶体…", st.open_file, "Ctrl+O")
+        rec = tk.Menu(fm, tearoff=0, postcommand=lambda: self._fill_recent(rec))
+        fm.add_cascade(label=T("最近打开"), menu=rec)
+        self._recent_menu = rec
+        fm.add_separator()
+        cmd(fm, "导出结构 (取代后 / 参考分子)…", st.export_sub)
+        cmd(fm, "导出选中分子 xyz…", st.export_selected)
+        cmd(fm, "选中两分子 → 二聚体 xyz…", st.export_pair)
+        cmd(fm, "整个场景另存为 xyz…", st.save_xyz)
+        cmd(fm, "保存结构图片…", st.save_image, "Ctrl+S")
+        fm.add_separator()
+        cmd(fm, "设置工作目录…", self.set_workdir)
+        fm.add_separator()
+        cmd(fm, "退出", self.destroy)
+        # 编辑
+        em = menu("编辑")
+        em.add_checkbutton(label=T("原子取代模式"), variable=st.sub_mode, command=S(st.toggle_sub))
+        em.add_checkbutton(label=T("测量模式 (距离 / 键角 / 二面角)"), variable=st.meas_mode, command=S(st.toggle_measure))
+        em.add_separator()
+        cmd(em, "撤销取代", st.undo_sub, "Ctrl+Z")
+        cmd(em, "清除选择", st.clear_sub, "Esc")
+        # 构建
+        bm = menu("构建")
+        rg = cascade(bm, "显示范围 / 超胞")
+        for lab, r0, r1 in (("1×1×1", 0, 1), ("2×2×2", 0, 2), ("3×3×3", 0, 3), ("中心 3×3×3", -1, 2)):
+            rg.add_command(label=T(lab), command=S(lambda a=r0, b=r1: st.set_range(a, b)))
+        rg.add_separator()
+        rg.add_command(label=T("自定义范围…"), command=panel("显示范围"))
+        cmd(bm, "晶胞缩放 / 应变…", panel("晶胞大小"))
+        cmd(bm, "原子 / 基团取代…", panel("原子取代"))
+        cmd(bm, "拆分为分子 (分子列表)…", panel("分子列表"))
+        bm.add_separator()
+        cmd(bm, "近邻二聚体…", panel("晶体二聚体"))
+        cmd(bm, "搜索近邻二聚体", lambda: (panel("晶体二聚体")(), st.search()))
+        cmd(bm, "应变扫描 (EHT → μ)", st.strain_scan)
+        # 视图
+        vm = menu("视图")
+        sm = cascade(vm, "显示样式")
+        for k in STYLES:
+            sm.add_radiobutton(label=T(k), value=T(k), variable=st.style_var, command=S(st.redraw))
+        bg = cascade(vm, "背景")
+        for k in BACKGROUNDS:
+            bg.add_radiobutton(label=T(k), value=T(k), variable=st.bg_var, command=S(st.redraw))
+        vm.add_checkbutton(label=T("透视"), variable=st.persp, command=S(st.redraw))
+        vm.add_checkbutton(label=T("显示氢"), variable=st.show_h, command=S(st.redraw))
+        vm.add_checkbutton(label=T("原子编号"), variable=st.show_lab, command=S(st.redraw))
+        vm.add_checkbutton(label=T("显示每个晶胞的边框"), variable=st.all_cells, command=S(st.redraw))
+        vm.add_separator()
+        vm.add_radiobutton(label=T("晶胞"), value="cell", variable=st.mode, command=S(st.rebuild))
+        vm.add_radiobutton(label=T("近邻簇"), value="cluster", variable=st.mode, command=S(st.rebuild))
+        vm.add_separator()
+        va = cascade(vm, "观察方向")
+        for lab, v in (("a", 0), ("b", 1), ("c", 2), ("x", "x"), ("y", "y"), ("z", "z")):
+            va.add_command(label=f"{T('沿')} {lab}", command=S(lambda v=v: st.view_along(v)))
+        cmd(vm, "重置视角", lambda: st.redraw(keep_view=False))
+        vm.add_separator()
+        cmd(vm, "显示 / 隐藏结构面板", lambda: self.toggle_nav(), "Ctrl+B")
+        fs = cascade(vm, "字体")
+        for k, v in FONT_SCALES.items():
+            fs.add_command(label=f"{T(k)} ({int(v * 100)}%)", command=S(lambda v=v: self.set_font_scale(v)))
+        fs.add_separator()
+        fs.add_command(label=T("放大"), accelerator="Ctrl +", command=lambda: self.change_font(+1))
+        fs.add_command(label=T("缩小"), accelerator="Ctrl −", command=lambda: self.change_font(-1))
+        th = cascade(vm, "主题配色")
+        from .theme import THEME, THEMES
+        self._theme_var = tk.StringVar(value=THEME)
+        for k in THEMES:
+            th.add_radiobutton(label=T(k), value=k, variable=self._theme_var,
+                               command=lambda k=k: self.set_theme(k))
+        lg = cascade(vm, "语言 / Language")
+        lg.add_command(label="中文", command=lambda: self.set_lang("zh"))
+        lg.add_command(label="English", command=lambda: self.set_lang("en"))
+        # Gaussian (一个运行对话框 + 各功能页)
+        gm = menu("Gaussian")
+        cmd(gm, "运行 Gaussian…", self.open_run_gaussian, "Ctrl+G")
+        gm.add_separator()
+        for lab, calc in (("结构优化 + 频率…", "opt"), ("四点法重组能…", "reorg"), ("激发态 S0 / S1 / T1…", "excited"),
+                          ("二聚体转移积分 (投影法)…", "ti"), ("相互作用能 (抵消校正)…", "cp"),
+                          ("ESP 电荷与极化率…", "esp"), ("FCHT 黄昆因子…", "fcht")):
+            cmd(gm, lab, lambda c=calc: self.open_run_gaussian(c))
+        # ADF
+        am = menu("ADF")
+        cmd(am, "运行 ADF…", self.open_run_adf)
+        am.add_separator()
+        cmd(am, "二聚体转移积分 (片段法)…", lambda: self.open_run_adf("ti"))
+        cmd(am, "晶体全部近邻二聚体 (批处理)…", lambda: self.open_run_adf("crystal"))
+        am.add_separator()
+        cmd(am, "批量扫描 / CEDS / 主动学习…", page("批量扫描工作流"))
+        cmd(am, "测试 ADF 环境…", lambda: ProgramsDialog(self))
+        # 迁移率 (软件内计算，不需要外部程序)
+        mm_ = menu("迁移率")
+        cmd(mm_, "软件内 EHT：全部二聚体 J → 迁移率表", st.eht_all)
+        cmd(mm_, "转移积分 (软件内 EHT)…", lambda: self.open_ti("eht"))
+        cmd(mm_, "转移积分 (软件内 ZINDO/MOO)…", lambda: self.open_ti("zindo"))
+        mm_.add_separator()
+        cmd(mm_, "迁移率 (Marcus / KMC / 三维)…", page("迁移率"))
+        cmd(mm_, "瞬态局域化 TLT / 能带 / 动态无序…", page("输运理论与光物理扩展"))
+        cmd(mm_, "极化位点能 (P±、σ_E)…", page("极化位点能"))
+        cmd(mm_, "无定形形貌 (GROMACS → KMC)…", page("无定形形貌 (MD)"))
+        cmd(mm_, "迁移率方法对比…", page("迁移率方法对比"))
+        mm_.add_separator()
+        cmd(mm_, "相互作用能 (UFF) 与能量框架…", page("分子间相互作用能", "快速计算"))
+        cmd(mm_, "耦合代理模型与堆积设计…", page("耦合代理模型与堆积设计"))
+        # 分析：读取已完成的计算
+        an = menu("分析")
+        cmd(an, "重组能 (读取 Gaussian log)…", page("重组能", "结果分析"))
+        cmd(an, "IP / EA / 前线轨道…", page("IP/EA"))
+        cmd(an, "重组能分解 / 黄昆因子…", page("分解/黄昆因子"))
+        cmd(an, "激发态与光谱…", page("激发态/光谱", "读取结果"))
+        cmd(an, "转移积分读取与三种方法对比…", page("转移积分", "结果读取"))
+        cmd(an, "波函数分析 (轨道 / 电荷 / ESP / NBO / IGM)…", page("波函数分析"))
+        cmd(an, "相互作用能 (Gaussian 结果) 与能量框架…", page("分子间相互作用能", "Gaussian"))
+        cmd(an, "扫描结果 / CEDS / 主动学习…", page("批量扫描工作流", "运行与结果"))
+        # 任务
+        jm = menu("任务")
+        cmd(jm, "新建流程 (流程图)…", self.open_flow, "Ctrl+L")
+        cmd(jm, "打开流程…", lambda: self.open_flow().load())
+        cmd(jm, "任务管理器 (运行 / 停止 / 状态)…", lambda: self.open_runner(), "Ctrl+J")
+        cmd(jm, "程序路径设置…", lambda: ProgramsDialog(self))
+        # 窗口
+        wm = tk.Menu(m, tearoff=0, postcommand=lambda: self._fill_windows(wm))
+        m.add_cascade(label=T("窗口"), menu=wm)
+        # 帮助
+        hm = menu("帮助")
+        cmd(hm, "关于", self.about)
+        cmd(hm, "引用文献…", lambda: CitationDialog(self))
         self.configure(menu=m)
-        for seq, fn in (("<Control-b>", lambda e: self.toggle_nav()), ("<Control-B>", lambda e: self.toggle_nav()),
-                        ("<Control-plus>", lambda e: self.change_font(+1)), ("<Control-equal>", lambda e: self.change_font(+1)),
-                        ("<Control-minus>", lambda e: self.change_font(-1)), ("<Control-0>", lambda e: self.set_font_scale(1.0)),
-                        ("<Control-KP_Add>", lambda e: self.change_font(+1)),
-                        ("<Control-KP_Subtract>", lambda e: self.change_font(-1))):
+        keys = (("<Control-o>", lambda e: S(st.open_file)()), ("<Control-s>", lambda e: S(st.save_image)()),
+                ("<Control-b>", lambda e: self.toggle_nav()), ("<Control-B>", lambda e: self.toggle_nav()),
+                ("<Control-g>", lambda e: S(self.open_run_gaussian)()), ("<Control-j>", lambda e: self.open_runner()),
+                ("<Control-l>", lambda e: S(self.open_flow)()),
+                ("<Control-z>", lambda e: S(st.undo_sub)()), ("<Escape>", lambda e: S(st.clear_sub)()),
+                ("<Control-plus>", lambda e: self.change_font(+1)), ("<Control-equal>", lambda e: self.change_font(+1)),
+                ("<Control-minus>", lambda e: self.change_font(-1)), ("<Control-0>", lambda e: self.set_font_scale(1.0)))
+        for seq, fn in keys:
             try:
-                self.bind_all(seq, fn)
+                self.bind(seq, fn)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _fill_windows(self, menu):
+        menu.delete(0, "end")
+        menu.add_command(label=T("主窗口 (结构)"), command=lambda: (self.lift(), self.focus_set()))
+        if self._wins:
+            menu.add_separator()
+        for name, win in self._wins.items():
+            menu.add_command(label=T(name), command=lambda n=name: self.show_page(n))
+        if self._wins:
+            menu.add_separator()
+            menu.add_command(label=T("关闭全部功能窗口"), command=lambda: [w.withdraw() for w in self._wins.values()])
 
     def set_workdir(self, d=None):
         """工作目录：所有文件选择框的下拉列表会列出其中 (及下一层子目录) 的匹配文件，浏览时也从这里开始。"""
@@ -7512,7 +7886,18 @@ class App(tk.Tk):
 
     def recent_structures(self):
         ok = (".xyz", ".gjf", ".com", ".log", ".out", ".fchk", ".cif")
-        return [p for p in self.config_data.get("recent_files", []) if p.lower().endswith(ok) and Path(p).is_file()][:12]
+        def usable(p):
+            try:
+                return Path(p).is_file()
+            except OSError:              # 已删除的临时目录、断开的网络盘等 (Windows: 拒绝访问)
+                return False
+        rec = self.config_data.get("recent_files", [])
+        out = [p for p in rec if isinstance(p, str) and p.lower().endswith(ok) and usable(p)][:12]
+        gone = [p for p in rec if isinstance(p, str) and p.lower().endswith(ok) and not usable(p)]
+        if gone:                          # 顺手清理失效的记录
+            self.config_data["recent_files"] = [p for p in rec if p not in gone]
+            save_config(self.config_data)
+        return out
 
     def _fill_recent(self, menu):
         menu.delete(0, "end")
@@ -7535,6 +7920,15 @@ class App(tk.Tk):
         nxt = [v for v in steps if (v > cur + 1e-6 if step > 0 else v < cur - 1e-6)]
         if nxt:
             self.set_font_scale(nxt[0] if step > 0 else nxt[-1])
+
+    def set_theme(self, name):
+        """切换主题配色：保存设置后重建主窗口 (与切换语言相同)。"""
+        if name == self.config_data.get("theme", "专业浅色"):
+            return
+        self.config_data["theme"] = name
+        save_config(self.config_data)
+        self.restart = True
+        self.destroy()
 
     def set_lang(self, lang):
         if lang != i18n.LANG:
@@ -7565,6 +7959,17 @@ class App(tk.Tk):
         self.logbox.see("end")
         last = text.splitlines()[-1] if text else ""
         self.status.configure(text="  " + last[:160])
+
+
+App.TAB_CLASSES = {
+    "重组能": ("reorg_tab", ReorgTab), "IP/EA": ("ipea_tab", IPEATab), "分解/黄昆因子": ("decomp_tab", DecompTab),
+    "激发态/光谱": ("photo_tab", PhotoTab), "转移积分": ("ti_tab", TITab), "迁移率": ("mob_tab", MobilityTab),
+    "输运理论与光物理扩展": ("adv_tab", AdvancedTab), "分子间相互作用能": ("inter_tab", InteractionTab),
+    "耦合代理模型与堆积设计": ("sur_tab", SurrogateTab), "波函数分析": ("wfn_tab", WavefunctionTab),
+    "批量扫描工作流": ("scan_tab", ScanTab), "极化位点能": ("pol_tab", PolarTab), "无定形形貌 (MD)": ("morph_tab", MorphTab),
+    "迁移率方法对比": ("cmp_tab", CompareTab)}
+for _name, (_attr, _cls) in App.TAB_CLASSES.items():          # app.reorg_tab 等：首次访问时创建对应的功能窗口
+    setattr(App, _attr, property(lambda self, n=_name: self._get_tab(n)))
 
 
 def compress_ranges(idx):

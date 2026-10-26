@@ -8,6 +8,16 @@ from .gaussian_io import COVALENT_RADII
 
 matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC",
                                           "WenQuanYi Micro Hei", "DejaVu Sans"]
+
+def font_chain(names):
+    """只保留本机已安装的字体，末尾补 DejaVu Sans (matplotlib 自带)；用作 font.family 时逐字回退。"""
+    from matplotlib import font_manager
+    have = {f.name for f in font_manager.fontManager.ttflist}
+    out = [n for n in dict.fromkeys(names) if n in have]
+    return out + ([] if "DejaVu Sans" in out else ["DejaVu Sans"])
+
+
+matplotlib.rcParams["font.family"] = font_chain(matplotlib.rcParams["font.sans-serif"])   # ⁻ 等用 DejaVu 显示
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 CPK = {"H": "#E8E8E8", "C": "#505050", "N": "#3050F8", "O": "#FF0D0D", "F": "#90E050", "S": "#E6C619",

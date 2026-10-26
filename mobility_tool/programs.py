@@ -116,9 +116,17 @@ def find_shell(ams_home=None):
         if w:
             cands.append(Path(w))
     for c in cands:
-        if c.is_file():
+        if c.is_file() and not _is_wsl_stub(c):
             return str(c)
     return None
+
+
+def _is_wsl_stub(p):
+    """Windows 的 System32\\bash.exe / WindowsApps\\bash.exe 是 WSL 启动器，未安装发行版时只会提示安装 WSL。"""
+    if not IS_WIN:
+        return False
+    s = str(p).lower().replace("/", "\\")
+    return "\\system32\\" in s or "\\sysnative\\" in s or "\\windowsapps\\" in s
 
 
 def ams_env(info, scratch=None):
