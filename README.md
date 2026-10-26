@@ -1,7 +1,7 @@
 # Mobilis 迁跃
 
 [![tests](https://github.com/xiaoshentu/Mobilis/actions/workflows/tests.yml/badge.svg)](https://github.com/xiaoshentu/Mobilis/actions/workflows/tests.yml)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23593489.svg)](https://doi.org/10.5281/zenodo.23593489)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23593488.svg)](https://doi.org/10.5281/zenodo.23593488)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 **A charge-transport and photophysics toolkit for organic semiconductors** — from a crystal structure or an MD
@@ -70,7 +70,7 @@ python tests/run_all.py --quick  # skips the slow GUI smoke test and test_v18 (~
 If you use Mobilis, please cite:
 
 > Y. Shi, *Mobilis: a charge-transport and photophysics toolkit for organic semiconductors*, version 1.16.0 (2026).
-> Zenodo. https://doi.org/10.5281/zenodo.23593489
+> Zenodo. https://doi.org/10.5281/zenodo.23593488
 
 Metadata for citation managers is in [CITATION.cff](CITATION.cff).
 
