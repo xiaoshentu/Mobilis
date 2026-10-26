@@ -2,7 +2,7 @@
 
 **开发者：Yarui Shi（安阳师范学院 Anyang Normal University）**
 
-源代码：https://github.com/xiaoshentu/Mobilis · DOI：[10.5281/zenodo.23593488](https://doi.org/10.5281/zenodo.23593488) · 许可证 GPL-3.0
+源代码：https://github.com/xiaoshentu/Mobilis · DOI：[10.5281/zenodo.23593489](https://doi.org/10.5281/zenodo.23593489) · 许可证 GPL-3.0
 
 **有机半导体电荷输运与光物理计算平台** — 重组能、IP/EA、黄昆因子、激发态、转移积分 (Gaussian / ADF / EHT / ZINDO)、
 Marcus / KMC / 瞬态局域化 (TLT) 迁移率。
