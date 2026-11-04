@@ -1,5 +1,7 @@
 """无定形 / MD 形貌 (morphology)：读写 .gro/.pdb、元素推断、映射 (乱序、跨边界、联合原子)、近邻、EHT J、位点能、KMC、
 方法对比与命令行。"""
+import os as _os
+_os.environ.setdefault("MOBILIS_LANG", "zh")   # these tests check the Chinese messages
 import os
 import subprocess
 import sys

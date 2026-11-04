@@ -134,6 +134,12 @@ def test_mobility():
     r = compute_mobility(0.2, paths, 300.0, dimension=1)
     d_ref = 0.5 * 2 * k * (5e-8) ** 2          # 1D 随机行走 D = ½ Σ k r²
     assert abs(r["mobility_tensor_cm2_Vs"][0][0] - d_ref / (8.617333262e-5 * 300)) < 1e-12
+    assert abs(r["mobility_cm2_Vs"] - r["mobility_tensor_cm2_Vs"][0][0]) < 1e-12        # 标量 = 无规行走
+    assert abs(r["mobility_DG_cm2_Vs"] - 0.5 * r["mobility_cm2_Vs"]) < 1e-12          # Deng–Goddard 式多乘 P = 1/2
+    p3 = [{"vector": [5.0, 0, 0], "J_meV": 50, "count": 2}, {"vector": [2.0, 4.0, 0], "J_meV": 20, "count": 4},
+          {"vector": [0, 0, 9.0], "J_meV": 3, "count": 2}]
+    r3 = compute_mobility(0.2, p3, 300.0, dimension=3)
+    assert abs(r3["mobility_cm2_Vs"] - r3["mobility_tensor_average_cm2_Vs"]) < 1e-12 * r3["mobility_cm2_Vs"]
     print(f"迁移率 OK: k = {k:.3e} s^-1, μ(1D) = {r['mobility_cm2_Vs']:.3f} cm^2/Vs")
 
 

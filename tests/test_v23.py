@@ -1,5 +1,7 @@
 """ZINDO/S 与 MOO (zindo)：Slater 重叠、INDO/S 自洽场、MOO 与二聚体投影、Gaussian ZINDO 输入路径、
 近简并能级耦合、形貌中的 ZINDO 耦合与命令行。"""
+import os as _os
+_os.environ.setdefault("MOBILIS_LANG", "zh")   # these tests check the Chinese messages
 import math
 import os
 import subprocess

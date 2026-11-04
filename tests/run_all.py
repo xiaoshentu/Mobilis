@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SLOW = {"smoke_gui.py", "test_v18.py"}
+SLOW = {"smoke_gui.py", "test_v18.py", "test_v32.py"}
 
 
 def main():

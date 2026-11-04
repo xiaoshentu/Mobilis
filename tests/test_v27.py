@@ -1,5 +1,7 @@
 """ceds al：主动学习耦合曲面的完整流程 (命令行)。用模拟 ADF (软件内 EHT) 代替真实计算：
 第 1 轮 → 算完 → 拟合并写下一轮 … 直到收敛；再用 --al-surfaces 的 GP 曲面做 MD → σ_V → TLT。"""
+import os as _os
+_os.environ.setdefault("MOBILIS_LANG", "zh")   # these tests check the Chinese messages
 import os
 import subprocess
 import sys
