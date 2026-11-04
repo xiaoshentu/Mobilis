@@ -2662,13 +2662,9 @@ class TITab(ttk.Frame):
 
         def work():
             sa, sb = [x[0] for x in a_], [x[0] for x in b_]
-            bb = b_
-            if sa != sb:
-                from .polar import match_atoms
-                perm, _ = match_atoms(sa, np.array([x[1:] for x in a_]), sb, np.array([x[1:] for x in b_]))
-                bb = [b_[k] for k in perm]
-            Xa, Xb = np.array([x[1:] for x in a_], float), np.array([x[1:] for x in bb], float)
+            Xa = np.array([x[1:] for x in a_], float)
             moo = MOO(sa, Xa, zorb, degeneracy=deg)
+            Xb = moo._ordered(np.array([x[1:] for x in b_], float), sb)   # 原子顺序不同时按几何重新对应
             from .morphology import kabsch_batch
             _, _, rm = kabsch_batch(Xb[None], Xa)
             j = moo.coupling_atoms(Xa, Xb)
@@ -2820,7 +2816,7 @@ class TITab(ttk.Frame):
 # ==============================================================================================
 class MobilityTab(ttk.Frame):
     """Marcus 跳跃 + 角分辨迁移率。μ_φ = e/(2k_BT) Σ r_i² W_i P_i cos²γ_i cos²(θ_i − φ)"""
-    M3D = ["Wen 公式 (与二维极坐标图一致)", "迁移率张量 (无规行走，同 KMC)"]
+    M3D = ["修正式 (无规行走张量，默认)", "Wen 原式 (含跳跃概率，供文献对比)"]
     COLS = ("名称", "x/Å", "y/Å", "z/Å", "r/Å", "θ/°", "γ/°", "Ve", "Vh", "数目")
 
     def __init__(self, parent, app):
@@ -2864,6 +2860,7 @@ class MobilityTab(ttk.Frame):
         c = ttk.LabelFrame(left, text="角分辨迁移率极坐标图")
         c.pack(fill="x")
         self.label = field(c, 0, "体系名称", "Ir-BB")
+        self.m3_model = field(c, 3, "公式", self.M3D[0], values=self.M3D, width=26)
         cb = ttk.Frame(c)
         cb.grid(row=1, column=0, columnspan=2, sticky="we")
         for txt, cmd in (("加入对比", self.add_compare), ("清空对比", self.clear_compare), ("导出图片…", self.export_fig)):
@@ -2872,7 +2869,7 @@ class MobilityTab(ttk.Frame):
         self.cmp_lab.grid(row=2, column=0, columnspan=2, sticky="w")
         c3 = ttk.LabelFrame(left, text="三维各向异性迁移率")
         c3.pack(fill="x", pady=3)
-        self.m3_model = field(c3, 0, "模型", self.M3D[0], values=self.M3D, width=26)
+        ttk.Label(c3, text="公式同上方的角分辨设置", foreground=PALETTE["muted"]).grid(row=0, column=0, columnspan=2, sticky="w")
         cb3 = ttk.Frame(c3)
         cb3.grid(row=1, column=0, columnspan=2, sticky="we")
         ttk.Button(cb3, text="三维迁移率图", command=S(self.compute3d)).pack(side="left", fill="x", expand=True)
@@ -3118,6 +3115,9 @@ class MobilityTab(ttk.Frame):
         self.app.log(f"配置已保存 {p}")
 
     # ---------------- 计算 ----------------
+    def _model(self):
+        return "wen" if self.m3_model.get() == self.M3D[1] else "tensor"
+
     def compute(self):
         paths, temps = self._paths(), self._temps()
         lam = {"e": float(self.lam_e.get()), "h": float(self.lam_h.get())}
@@ -3128,9 +3128,10 @@ class MobilityTab(ttk.Frame):
             for c, key in (("e", "Ve_eV"), ("h", "Vh_eV")):
                 ps = [dict(d, V=d[key]) for d in paths if d[key] is not None]
                 if ps:
-                    res[T][c] = angular_mobility_2d(lam[c], ps, T, "V", dg_ev=dg)
+                    res[T][c] = angular_mobility_2d(lam[c], ps, T, "V", dg_ev=dg, model=self._model())
                     scal = compute_mobility(lam[c], [dict(p_, J_eV=p_["V"]) for p_ in ps], T, dim, dg)
                     res[T][c]["scalar_mu"] = scal["mobility_cm2_Vs"]
+                    res[T][c]["scalar_mu_dg"] = scal["mobility_DG_cm2_Vs"]
                     if "mobility_principal_cm2_Vs" in scal:
                         res[T][c]["tensor_principal"] = scal["mobility_principal_cm2_Vs"]
         T0 = temps[0]
@@ -3154,7 +3155,8 @@ class MobilityTab(ttk.Frame):
             if c in r0:
                 q = r0[c]
                 line = (f"\n{lab}: μmax = {q['mu_max']:.4g} cm²/Vs (φ = {q['phi_max_deg']:.1f}°)  μmin = {q['mu_min']:.4g}"
-                        f"  各向异性 {q['anisotropy']:.3g}  |  三维标量公式 μ = {q['scalar_mu']:.4g}")
+                        f"  各向异性 {q['anisotropy']:.3g}  |  三维标量 μ = {q['scalar_mu']:.4g}"
+                        f" (Deng–Goddard 式 {q['scalar_mu_dg']:.4g}，仅供对比)")
                 if "tensor_principal" in q:
                     line += "  张量主值 " + ", ".join(f"{w:.4g}" for w in q["tensor_principal"])
                 t.insert("end", line + "\n")
@@ -3318,7 +3320,7 @@ class MobilityTab(ttk.Frame):
             raise ValueError("三维图需要每条路径的 x、y、z (跳跃矢量)")
         T0 = self._temps()[0]
         dg = float(self.dg.get())
-        model = "wen" if self.m3_model.get() == self.M3D[0] else "tensor"
+        model = self._model()
         out = []
         for key, lam, lab, col in (("Ve_eV", float(self.lam_e.get()), "电子", E_COLOR),
                                    ("Vh_eV", float(self.lam_h.get()), "空穴", H_COLOR)):

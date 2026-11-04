@@ -43,9 +43,12 @@ def _cif_tokens(text):
         if s.lower() == "loop_":
             i += 1
             heads = []
-            while i < len(lines) and lines[i].strip().startswith("_"):
-                heads.append(lines[i].strip().split()[0].lower())
+            while i < len(lines) and (lines[i].strip().startswith("_") or not lines[i].strip()):
+                if lines[i].strip():                     # 有些 CIF 在循环表头之间留空行
+                    heads.append(lines[i].strip().split()[0].lower())
                 i += 1
+            if not heads:
+                continue
             vals = []
             while i < len(lines):
                 t = lines[i].strip()
@@ -249,7 +252,30 @@ def find_dimers(crys, molecules, ref=0, cutoff=4.0, criterion="atom", fp_tol=0.0
             d["group"] = gi + 1
     atoms_a = list(zip(ra["symbols"], ra["cart"].tolist()))
     return {"ref": ref, "cutoff": cutoff, "criterion": criterion, "atoms_a": atoms_a,
-            "dimers": dimers, "groups": groups}
+            "dimers": dimers, "groups": groups, "point_ops": point_ops_cart(crys)}
+
+
+def point_ops_cart(crys):
+    """空间群操作的转动部分 (笛卡尔坐标, 去重)，即晶体点群。用于把迁移率张量对称化。"""
+    lat = np.asarray(crys["lattice"], float)
+    A, Ai = lat.T, np.linalg.inv(lat.T)
+    out = []
+    for rot, _ in crys.get("symops") or []:
+        R = A @ np.asarray(rot, float) @ Ai
+        if not any(np.allclose(R, Q, atol=1e-6) for Q in out):
+            out.append(R)
+    for R in list(out):                                  # 迁移率张量是中心对称的：补上 −R
+        if not any(np.allclose(-R, Q, atol=1e-6) for Q in out):
+            out.append(-R)
+    return [R.round(12).tolist() for R in out] or [np.eye(3).tolist()]
+
+
+def symmetrize_tensor(M, ops):
+    """M → (1/|G|) Σ R M Rᵀ。单个参考分子的近邻在 Z > 2 的晶体中不一定满足晶体对称性，平均后得到晶体张量。"""
+    M = np.asarray(M, float)
+    if not ops:
+        return M
+    return sum(np.asarray(R) @ M @ np.asarray(R).T for R in ops) / len(ops)
 
 
 def export_dimers(result, outdir, prefix="G"):
@@ -273,6 +299,7 @@ def export_dimers(result, outdir, prefix="G"):
         "neighbors": [{"group": d["group"], "vector": d["vector"], "r_centroid": d["r_centroid"],
                        "d_min": d["d_min"], "translation": d["translation"], "mol": d["mol"]}
                       for d in result["dimers"]],
+        "point_ops": result.get("point_ops"),
     }
     (outdir / "dimers.json").write_text(json.dumps(info, indent=2, ensure_ascii=False))
     return files

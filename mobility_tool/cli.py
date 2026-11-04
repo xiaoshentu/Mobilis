@@ -1,5 +1,7 @@
 """命令行入口:  python -m mobility_tool <子命令> ..."""
 import argparse
+import os
+import sys
 
 import numpy as np
 import json
@@ -88,8 +90,11 @@ def _print_mobility(res):
     for p in res["pathways"]:
         print(f"  {p['name']:<10}{p['r_A']:9.3f}{p['J_meV']:10.3f}{p['count']:6d}"
               f"{p['k_s-1']:13.4e}{p['P']:9.4f}")
-    print(f"  扩散系数 D = {res['D_cm2_s']:.4e} cm^2/s")
-    print(f"  迁移率   μ = {res['mobility_cm2_Vs']:.4f} cm^2/(V·s)   [D = Σ r²kP/2n]")
+    print(f"  扩散系数 D = {res['D_cm2_s']:.4e} cm^2/s   [无规行走 D = Σ k r²/2n]")
+    print(f"  迁移率   μ = {res['mobility_cm2_Vs']:.4f} cm^2/(V·s)")
+    if "mobility_DG_cm2_Vs" in res:
+        print(f"  (对比) Deng–Goddard 式 D = Σ r²kP/2n：μ = {res['mobility_DG_cm2_Vs']:.4f} cm^2/(V·s)，"
+              f"偏小 {res['mobility_cm2_Vs'] / max(res['mobility_DG_cm2_Vs'], 1e-300):.1f} 倍")
     if "mobility_principal_cm2_Vs" in res:
         w = res["mobility_principal_cm2_Vs"]
         print(f"  迁移率张量主值 = {w[0]:.4f}, {w[1]:.4f}, {w[2]:.4f} cm^2/(V·s)  "
@@ -107,7 +112,14 @@ def cmd_mobility(a):
         key = "hole" if a.carrier == "hole" else "electron"
         paths = mobility_pathways_from_dimers(Path(a.dimers) / "dimers.json",
                                               {g: abs(v[key]) for g, v in coup.items() if v.get(key) is not None})
-        results = [compute_mobility(a.lam, paths, a.temp, a.dim)]
+        info = json.loads((Path(a.dimers) / "dimers.json").read_text(encoding="utf-8"))
+        ops = info.get("point_ops")
+        if a.cif:
+            from .crystal import point_ops_cart, read_cif
+            ops = point_ops_cart(read_cif(a.cif))
+        if not ops:
+            print("  [提示] dimers.json 中没有晶体点群 (v1.21.2 以前导出)；每个晶胞多于两个分子时请加 --cif 以对称化张量")
+        results = [compute_mobility(a.lam, paths, a.temp, a.dim, point_ops=ops)]
     elif a.config:
         results = mobility_from_config(a.config)
     else:
@@ -243,7 +255,7 @@ def cmd_mobility2d(a):
     for key, lam, lab in (("Ve", a.lam_e, "电子"), ("Vh", a.lam_h, "空穴")):
         if lam is None or not any(p[key] is not None for p in paths):
             continue
-        r = angular_mobility_2d(lam, [p for p in paths if p[key] is not None], a.temp, key)
+        r = angular_mobility_2d(lam, [p for p in paths if p[key] is not None], a.temp, key, model=a.model)
         print(f"\n{lab} (λ={lam} eV, T={a.temp} K)")
         print(f"{'路径':<8}{'r/Å':>9}{'θ/°':>10}{'W/s-1':>13}{'P':>9}")
         for q in r["pathways"]:
@@ -365,7 +377,7 @@ def _gui(a):
 def cmd_eht_ti(a):
     from .eht import eht_from_file
     r = eht_from_file(a.dimer, a.na, a.mono_a, a.mono_b,
-                      orbitals=[o.strip() for o in a.orbitals.split(",")])
+                      orbitals=[o.strip() for o in a.orbitals.split(",")], pi=a.pi)
     for w in r["warnings"]:
         print(f"  [警告] {w}")
     print(f"软件内 EHT ({r['nbf']} 个基函数)")
@@ -391,7 +403,9 @@ def cmd_kmc(a):
     from .workflow import eht_couplings_for_crystal
     crys = read_cif(a.cif)
     mols = find_molecules(crys)
-    _, coup = eht_couplings_for_crystal(crys, mols, a.cutoff)
+    res0, coup = eht_couplings_for_crystal(crys, mols, a.cutoff, pi=a.pi)
+    for w in res0.get("eht_warnings", []):
+        print(f"  [警告] {w}")
     lam = a.lam
     g = graph_from_crystal(crys, mols, coup, a.cutoff, carrier=a.carrier)
     r = run_kmc(g, lam, a.temp, method=a.rate, lam_out=a.lam_out, hw=a.hw, carrier=a.carrier, sigma=a.sigma,
@@ -416,6 +430,17 @@ def cmd_strain(a):
               f"{r['mu_hole_max'] or 0:10.4g}{r['mu_electron_max'] or 0:10.4g}")
 
 
+def cmd_diagnose(a):
+    from .diagnose import diagnose, format_report, write_json
+    sc = tuple(int(x) for x in a.supercell.replace(",", " ").split()) if a.supercell else None
+    d = diagnose(a.cif, a.lam_h, a.lam_e, T=a.temp, cutoff=a.cutoff, supercell=sc, phonons=not a.no_phonons,
+                 uq=a.uq, n_samples=a.uq_samples, lam_rel=a.lam_rel, seed=a.seed)
+    print(format_report(d))
+    if a.json:
+        write_json(d, a.json)
+        print(f"Written {a.json}")
+
+
 def cmd_tlt(a):
     from .crystal import find_molecules, read_cif
     from .kmc import graph_from_crystal
@@ -423,7 +448,9 @@ def cmd_tlt(a):
     from .workflow import eht_couplings_for_crystal
     crys = read_cif(a.cif)
     mols = find_molecules(crys)
-    _, coup = eht_couplings_for_crystal(crys, mols, a.cutoff)
+    res0, coup = eht_couplings_for_crystal(crys, mols, a.cutoff, pi=a.pi)
+    for w in res0.get("eht_warnings", []):
+        print(f"  [警告] {w}")
     g = graph_from_crystal(crys, mols, coup, a.cutoff, carrier=a.carrier, signed=True)
     keep = tuple("abc".index(x) for x in a.plane)
     L = a.size or max(8, int(round(np.sqrt(600 / g["n_sites"]))))
@@ -450,7 +477,16 @@ def cmd_vibronic(a):
 
 def cmd_kmc_validate(a):
     from .validation import figure, format_rows, kmc_validation, write_csv
-    rows = kmc_validation(quick=a.quick)
+    cr = None
+    if a.cif:
+        from .workflow import eht_couplings_for_crystal
+        crys = read_cif(a.cif)
+        mols = find_molecules(crys)
+        _, coup = eht_couplings_for_crystal(crys, mols, a.cutoff)
+        cr = (crys, mols, coup, a.cutoff)
+    rows = kmc_validation(quick=a.quick, crystal=cr)
+    from .i18n import tr_cli
+    rows = [(tr_cli(r[0]),) + tuple(r[1:]) for r in rows]
     print(format_rows(rows))
     if a.out:
         write_csv(rows, a.out)
@@ -668,6 +704,9 @@ def cmd_ceds(a):
     if a.action == "md":
         _ceds_md(a, ce, surf, temps, mono)
         return
+    if a.action == "phonons":
+        _ceds_phonons(a, ce, surf, temps, mono)
+        return
     if a.action == "validate":
         _ceds_validate(a, ce, proj, surf)
         return
@@ -860,10 +899,12 @@ def cmd_zindo(a):
         at = read_geometry(a.dimer)
         n = a.na or len(at) // 2
         sa = [x[0] for x in at[:n]]
+        sb = [x[0] for x in at[n:]]
         Xa = np.array([x[1:] for x in at[:n]], float)
         Xb = np.array([x[1:] for x in at[n:]], float)
         moo = Z.MOO(sa, Xa, a.orbitals or None, deg)
-        j = moo.coupling_atoms(Xa, Xb)
+        j = moo.coupling_atoms(Xa, Xb, sym_b=sb)
+        Xb = moo._ordered(Xb, sb)
         print(f"单体轨道：{moo.source}")
         print(f"ZINDO/MOO        空穴 {1000 * j['hole']:9.3f}  电子 {1000 * j['electron']:9.3f} meV")
         if not a.orbitals:
@@ -1000,6 +1041,9 @@ def _ceds_al(a, ce, proj, temps, mono):
     from .alsurface import ALRun, al_report
     if proj is None:
         raise SystemExit("ceds al 需要 --project 与 --name")
+    a.al_mu_target_set = getattr(a, "al_mu_target", None) is not None
+    if not a.al_mu_target_set:
+        a.al_mu_target = 0.01
     run = ALRun(proj, a.name)
     if not run.exists:
         from .rigidmd import RigidCrystalMD, load_frames, run_temperature, snapshot_configs
@@ -1025,9 +1069,11 @@ def _ceds_al(a, ce, proj, temps, mono):
                 raise SystemExit(f"种子扫描 {sname} 不在项目中 (已有: {', '.join(proj.meta.get('scans', {})) or '无'})")
         info = run.start(ce, cfgs, lv, T, init=a.al_init, batch=a.al_batch, target=a.al_target,
                          info={"supercell": list(sc), "n_frames": int(len(fr["c"]))}, seeds=seeds, abs_floor=a.al_abs,
-                         delta=a.al_delta != "off")
+                         delta=a.al_delta != "off", goal="mu" if a.al_goal == "mu" else "sigma",
+                         mu_target=a.al_mu_target, hbar_tau=a.htau / 1000.0)
         print(f"主动学习 {a.name}：{len(gids)} 个近邻对，候选池每对 {a.al_pool} 个 MD 构型；"
-              + ("Δ-学习 (EHT 基线 + GP)" if run.delta else "GP (常数均值)"))
+              + ("Δ-学习 (EHT 基线 + GP)" if run.delta else "GP (常数均值)")
+              + (f"；以迁移率为目标 (μ 的 95% 区间半宽 ≤ {100 * a.al_mu_target:g}%)" if run.goal == "mu" else ""))
         if "seeded" in info:
             print("种子数据 (已算完的构型): " + ", ".join(f"G{g} {n} 个" for g, n in sorted(info["seeded"].items())) + "\n")
             print(al_report(info["rows"]))
@@ -1041,6 +1087,14 @@ def _ceds_al(a, ce, proj, temps, mono):
     if a.al_delta in ("on", "off") and run.delta != (a.al_delta == "on"):
         run.set_delta(a.al_delta == "on")
         print(f"已{'开启' if run.delta else '关闭'} Δ-学习 (EHT 基线)；已算的 DFT 数据全部保留，从这一轮起按新曲面拟合与选点\n")
+    if a.al_goal in ("sigma", "mu") and (run.goal != a.al_goal or (a.al_goal == "mu" and a.al_mu_target_set)):
+        run.set_goal(a.al_goal, a.al_mu_target if a.al_goal == "mu" else None)
+        print(f"选点与停止判据改为{'迁移率 μ 的后验区间' if run.goal == 'mu' else '各近邻对 σ_V 的后验区间'}；"
+              "已算的 DFT 数据全部保留\n")
+    rebuilt = run.rebuild_missing()
+    if rebuilt:
+        print(f"[提示] 扫描目录 {', '.join(rebuilt)} 不存在 (被删除？)：已按保存的选点重新写出 (构型与编号不变)。"
+              "运行其中的批处理，算完后再运行本命令\n")
     try:
         rows, new = run.step(ce, force=a.force)
     except ValueError as e:
@@ -1054,9 +1108,14 @@ def _ceds_al(a, ce, proj, temps, mono):
             if bad:
                 print(f"[提示] {', '.join(f'G{g}' for g in bad)} 的 EHT 基线相关性低 (r < 0.8)，Δ-学习的优势会变小；"
                       "曲面仍然正确 (GP 学习全部差值)，必要时可用 --al-delta off 对比")
-    print(f"主动学习 {a.name}：第 {len(run.state['rounds']) - (1 if new else 0)} 轮结果 "
-          f"(收敛判据：σ_V 的 95% 区间半宽 ≤ {100 * run.state['target']:.0f}%)\n")
+    crit = (f"μ 的 95% 区间半宽 ≤ {100 * run.state.get('mu_target', 0.01):g}%" if run.goal == "mu"
+            else f"σ_V 的 95% 区间半宽 ≤ {100 * run.state['target']:.0f}%")
+    print(f"主动学习 {a.name}：第 {len(run.state['rounds']) - (1 if new else 0)} 轮结果 (收敛判据：{crit})\n")
     print(al_report(rows))
+    if getattr(run, "last_mu", None):
+        lm = run.last_mu
+        print(f"\nTLT 迁移率 ({run.state['T']:g} K, ħ/τ = {1000 * run.state.get('hbar_tau', 0.005):g} meV，线性化后验)：" + "；".join(
+            f"{'空穴' if c == 'hole' else '电子'} {lm['mu'][c]:.3g} cm²/Vs ± {100 * lm['half'][c]:.1f}%" for c in lm["mu"]))
     if new:
         print(f"\n下一轮：{new['n']} 个 ADF 任务 → 扫描 {new['scan']}，批处理 {', '.join(new['batches'])}")
     else:
@@ -1071,6 +1130,20 @@ def _ceds_al(a, ce, proj, temps, mono):
                       f"仅含耦合曲面误差)")
         print("用这些曲面计算 μ(T)：")
         print(f"  python -m mobility_tool ceds md --cif {a.cif} --project {a.project} --al-surfaces {a.name}")
+    if a.al_budget:
+        from .alsurface import budget_report, error_budget
+        sE = {}
+        for c, x in zip(("hole", "electron"), (a.al_budget_sigma_e or "").replace(",", " ").split()):
+            sE[c] = float(x) / 1000.0
+        surf = run.surfaces(ce)
+        _, thermal = run.pool()
+        print(f"\n误差预算 ({run.state['T']:g} K, ħ/τ = {a.htau:g} meV，每项只改变一个因素) …", flush=True)
+        b = error_budget(ce, surf, {g: thermal[g] for g in surf}, run.state["T"], a.htau / 1000.0, sigma_E=sE or None,
+                         n_boot=a.al_budget, n_seeds=8)
+        print(budget_report(b))
+        print("± 为 95% 区间相对半宽 (数值误差)；× 为改用该参数 / 模型后 μ 的比值。\n"
+              "热运动样本一项对应主动学习的热样本数；ceds md --al-surfaces 用整段轨迹，这一项随样本数约按 1/√N 减小，"
+              "TLT 无序实现一项随实现数按 1/√n 减小")
 
 
 def _ceds_validate(a, ce, proj, surf):
@@ -1139,8 +1212,118 @@ def _ceds_md(a, ce, surf, temps, mono):
     print(f"用时 {time.time() - t0:.0f} s；默认设置 {DEFAULTS}")
 
 
+def _ceds_phonons(a, ce, surf, temps, mono):
+    """ceds phonons：刚体晶格动力学 → 各声子支对 σ_V 与 TLT 迁移率的贡献 (杀手声子)。"""
+    import os
+    import time
+    from . import phonons as PH
+    from .rigidmd import RigidCrystalMD
+    sc = tuple(int(x) for x in a.supercell.replace(",", " ").split())
+    md = RigidCrystalMD(ce.crys, ce.frames, mono or (ce.sym, ce.Y), sc, rc=a.md_rc, r_sw=a.md_rc - 1.0,
+                        charges=_md_charges(a, mono or (ce.sym, ce.Y)))
+    t0 = time.time()
+    if not a.ph_external:
+        print(f"刚体晶格动力学：超胞 {'×'.join(map(str, sc))} = {md.N} 个分子 (q 网格 {len(md.cells)} 点)；{md.ff_note}")
+    if a.ph_external:
+        ext = PH.read_phonopy_yaml(a.ph_external, a.ph_structure or None)
+        lat = PH.external_lattice(md, ce, ext, length_unit=a.ph_length_unit, phase=a.ph_phase)
+        inf = lat.info
+        low = lat.mode["freq_cm"] < 200.0
+        print(f"外部声子 {Path(a.ph_external).name}：{inf['n_q']} 个 q 点 × {inf['n_branch']} 支；长度单位 {inf['length_unit']}；"
+              f"与 CIF 的原子对应最大偏差 {inf['map_dev_A']:.2f} Å，晶格矢量长度比 "
+              f"{', '.join(f'{x:.3f}' for x in inf['lattice_ratio'])}")
+        print(f"  200 cm⁻¹ 以下的模平均刚体成分 {inf['rigid_fraction'][low].mean():.0%} (分子内形变对耦合的影响不计)")
+        ig = int(np.argmin(np.linalg.norm(lat.mode["q"] - np.round(lat.mode["q"]), axis=1)))
+        fg = np.sort(lat.mode["freq_cm"][ig])
+        print(f"  Γ 点最低频率 (cm⁻¹): {', '.join(f'{x:.1f}' for x in fg[3:15])} …")
+        if (lat.mode["freq_cm"] < -1.0).any():
+            print(f"[提示] 外部声子有 {(lat.mode['freq_cm'] < -1.0).sum()} 个虚频模，不计入")
+    else:
+        lat = PH.RigidLattice(md)
+        r = lat.relax()
+        print(f"  固定晶胞刚体弛豫：E {r['E0']:.2f} → {r['E']:.2f} kcal/mol 每分子，质心最大位移 {r['shift_max_A']:.3f} Å，"
+              f"最大转角 {r['rot_max_deg']:.2f}°")
+        lat.force_constants()
+        lat.modes()
+        print(f"  Γ 点频率 (cm⁻¹): {', '.join(f'{x:.1f}' for x in lat.mode['freq_cm'][0][3:])}  (已用 {time.time() - t0:.0f} s)")
+    jac = PH.pair_jacobians(lat, ce)
+    grad = PH.surface_gradient(ce, surf)
+    gamma_only = PH.gamma_subset(lat) if a.ph_gamma else None
+    base = os.path.splitext(a.out)[0] if a.out else ""
+    for T in temps:
+        mc = PH.mode_couplings(lat, ce, surf, T=T, quantum=a.ph_quantum, jac=jac, grad=grad)
+        mob = None
+        if not a.sigma_only:
+            mob = {c: PH.mobility_contributions(ce, mc, c, hbar_tau=None if a.ph_htau_auto else a.htau / 1000,
+                                                n_real=a.ph_real) for c in ("hole", "electron")}
+        print(f"\n========== T = {T:g} K ==========")
+        print(PH.summary_text(mc, mob))
+        if gamma_only is not None:
+            mg = PH.mode_couplings(gamma_only, ce, surf, T=T, quantum=a.ph_quantum, jac=jac, grad=grad)
+            print("\n-- 只用 Γ 点 (常见的单胞做法，对照) --")
+            for c in ("hole", "electron"):
+                print(f"[{c}] " + ", ".join(f"G{g} σ = {d[c]['sigma']:.2f}" for g, d in sorted(mg["pairs"].items())
+                                          if d[c]["sigma"] > 0.5))
+                cs = PH.character_shares(mg, c)
+                print("    σ² 运动分布: " + ", ".join(f"{PH.CHAR_LABEL[k]} {v:.0%}" for k, v in cs.items()))
+        if base:
+            tag = f"_{T:g}K" if len(temps) > 1 else ""
+            PH.export_csv(mc, f"{base}{tag}.csv", mob)
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            for c in ("hole", "electron"):
+                fig, axs = plt.subplots(1, 2 if mob else 1, figsize=(9 if mob else 4.5, 3.4), squeeze=False)
+                PH.plot_spectrum(axs[0], mc, mob[c] if mob else None, carrier=c)
+                axs[0, 0].set_title(f"{c}, {T:g} K", fontsize=9)
+                fig.tight_layout()
+                fig.savefig(f"{base}{tag}_{c}.png", dpi=300)
+                plt.close(fig)
+            print(f"已写出 {base}{tag}.csv 与 {base}{tag}_hole/electron.png")
+    print(f"用时 {time.time() - t0:.0f} s")
+
+
+def _fill_missing_help(parser, cmd=""):
+    from ._cli_i18n import OPTION_HELP
+    for act in parser._actions:
+        if isinstance(act, argparse._SubParsersAction):
+            if cmd and not act.help:
+                act.help = OPTION_HELP.get(act.dest)
+            for name, sp in act.choices.items():
+                _fill_missing_help(sp, name)
+        elif not act.help and not isinstance(act, argparse._HelpAction):
+            key = act.option_strings[-1] if act.option_strings else act.dest
+            act.help = OPTION_HELP.get(f"{cmd} {key}") or OPTION_HELP.get(key)
+
+
+def _translate_parser(parser):
+    from .i18n import tr_cli
+    if parser.description:
+        parser.description = tr_cli(parser.description)
+    for act in parser._actions:
+        if act.help and act.help is not argparse.SUPPRESS:
+            act.help = tr_cli(act.help)
+        if isinstance(act, argparse._VersionAction) and act.version:
+            act.version = tr_cli(act.version)
+        if isinstance(act, argparse._SubParsersAction):
+            for ca in act._choices_actions:
+                if ca.help:
+                    ca.help = tr_cli(ca.help)
+            for sp in act.choices.values():
+                _translate_parser(sp)
+
+
 def main(argv=None):
     from . import __affiliation__, __author__, __version__
+    from . import i18n
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) >= 2 and argv[0] == "--lang":          # python -m mobility_tool --lang zh <subcommand> ...
+        os.environ["MOBILIS_LANG"] = argv[1]
+        argv = argv[2:]
+    i18n.CLI_LANG = i18n.cli_lang_from_env()
+    if i18n.CLI_LANG == "en" and not isinstance(sys.stdout, i18n.TranslatingStream):
+        sys.stdout = i18n.TranslatingStream(sys.stdout)
+        sys.stderr = i18n.TranslatingStream(sys.stderr)
     ap = argparse.ArgumentParser(prog="mobility_tool", description="Mobilis 迁跃 — 有机半导体电荷输运与光物理计算平台")
     ap.add_argument("--version", action="version",
                     version=f"Mobilis {__version__}  (开发者: {__author__}, {__affiliation__})")
@@ -1197,6 +1380,7 @@ def main(argv=None):
     p.add_argument("--dimers", help="crystal 子命令导出的目录 (自动读取各组 J)")
     p.add_argument("--program", choices=["gaussian", "adf"], default="gaussian")
     p.add_argument("--carrier", choices=["hole", "electron"], default="hole")
+    p.add_argument("--cif", help="--dimers：从这个 CIF 取晶体点群对称化张量 (旧的 dimers.json 没有记录点群时)")
     p.add_argument("--json")
     p.set_defaults(func=cmd_mobility)
 
@@ -1269,6 +1453,8 @@ def main(argv=None):
     p.add_argument("--temp", type=float, default=300)
     p.add_argument("--scale", type=float, default=1.0, help="表中 V 的单位换算到 eV 的除数 (meV 用 1000)")
     p.add_argument("--plot", help="保存极坐标图的文件名")
+    p.add_argument("--model", choices=["tensor", "wen"], default="tensor",
+                   help="tensor: 修正式 (无规行走张量的投影，默认)；wen: Wen 原式 (含跳跃概率 P，系统性偏低，仅供与文献对比)")
     p.add_argument("--label", default="")
     p.set_defaults(func=cmd_mobility2d)
 
@@ -1278,7 +1464,7 @@ def main(argv=None):
     p.add_argument("--lam-h", type=float)
     p.add_argument("--temp", type=float, default=300)
     p.add_argument("--scale", type=float, default=1.0, help="表中 V 的单位换算到 eV 的除数 (meV 用 1000)")
-    p.add_argument("--model", choices=["wen", "tensor"], default="wen",
+    p.add_argument("--model", choices=["wen", "tensor"], default="tensor",
                    help="wen: Wen 公式的三维推广 (与二维图一致)；tensor: 无规行走迁移率张量")
     p.add_argument("--cif", help="晶体 (画出晶轴 a、b、c，并给出主轴的晶体学方向)")
     p.add_argument("--plane", default="xy", help="画出截面的传输平面 (xy / xz / yz)")
@@ -1332,6 +1518,7 @@ def main(argv=None):
     p.add_argument("--mono-a")
     p.add_argument("--mono-b")
     p.add_argument("--orbitals", default="HOMO,LUMO")
+    p.add_argument("--pi", action="store_true", help="用最高占据 / 最低空的 π 轨道代替 HOMO/LUMO (氮杂芳烃等孤对 σ 轨道落在 HOMO 附近时)")
     p.set_defaults(func=cmd_eht_ti)
 
     p = sub.add_parser("compare-ti", help="对比 EHT / Gaussian / ADF 三种方法的转移积分")
@@ -1352,6 +1539,7 @@ def main(argv=None):
     p.add_argument("--cutoff", type=float, default=4.0)
     p.add_argument("--walkers", type=int, default=2000)
     p.add_argument("--steps", type=int, default=3000)
+    p.add_argument("--pi", action="store_true", help="用最高占据 / 最低空的 π 轨道代替 HOMO/LUMO (氮杂芳烃等孤对 σ 轨道落在 HOMO 附近时)")
     p.set_defaults(func=cmd_kmc)
 
     p = sub.add_parser("strain-scan", help="晶胞缩放 (应变) 扫描: EHT 转移积分 → 迁移率")
@@ -1364,6 +1552,23 @@ def main(argv=None):
     p.add_argument("--cutoff", type=float, default=4.0)
     p.set_defaults(func=cmd_strain)
 
+    p = sub.add_parser("diagnose", help="Transport regime from a CIF: 2|J|/λ, phonon σ_J/|J|, interlayer coupling, "
+                                        "π frontier orbitals -> recommended model and command (a few seconds)")
+    p.add_argument("cif", help="Crystal structure (CIF)")
+    p.add_argument("--lam-h", type=float, required=True, help="Hole reorganization energy / eV")
+    p.add_argument("--lam-e", type=float, required=True, help="Electron reorganization energy / eV")
+    p.add_argument("--temp", type=float, default=300.0, help="Temperature / K")
+    p.add_argument("--cutoff", type=float, default=4.0, help="Neighbour criterion: shortest atom-atom distance / Å")
+    p.add_argument("--supercell", default="", help="Supercell of the lattice dynamics, e.g. 3,3,2 (default: >= 16 Å)")
+    p.add_argument("--no-phonons", action="store_true", help="Skip the lattice dynamics (no σ_J/|J|)")
+    p.add_argument("--uq", action="store_true",
+                   help="Regime probabilities from the EHT calibration error, λ and σ_J/|J| uncertainties (Monte Carlo)")
+    p.add_argument("--uq-samples", type=int, default=20000, help="Monte Carlo samples of --uq")
+    p.add_argument("--lam-rel", type=float, default=0.10, help="Relative uncertainty of λ for --uq")
+    p.add_argument("--seed", type=int, default=0, help="Random seed of --uq")
+    p.add_argument("--json", default="", help="Write the full result to this JSON file")
+    p.set_defaults(func=cmd_diagnose)
+
     p = sub.add_parser("tlt", help="CIF → EHT 转移积分 → 瞬态局域化 (TLT) 迁移率与有效质量")
     p.add_argument("cif")
     p.add_argument("--carrier", choices=["hole", "electron"], default="hole")
@@ -1374,6 +1579,7 @@ def main(argv=None):
     p.add_argument("--realizations", type=int, default=10)
     p.add_argument("--temp", type=float, default=300)
     p.add_argument("--cutoff", type=float, default=4.0)
+    p.add_argument("--pi", action="store_true", help="用最高占据 / 最低空的 π 轨道代替 HOMO/LUMO (氮杂芳烃等孤对 σ 轨道落在 HOMO 附近时)")
     p.set_defaults(func=cmd_tlt)
 
     p = sub.add_parser("vibronic", help="由 FCHT 黄昆因子计算振动分辨磷光光谱与能隙定律")
@@ -1385,6 +1591,8 @@ def main(argv=None):
 
     p = sub.add_parser("kmc-validate", help="KMC 精度自检：与精确解逐项比较 (可写出 CSV 与对照图)")
     p.add_argument("--quick", action="store_true")
+    p.add_argument("--cif", help="多分子晶胞：用这个晶体 (软件内 EHT 转移积分) 加一项晶体图 KMC 与均匀化精确解的比较")
+    p.add_argument("--cutoff", type=float, default=4.0, help="近邻判据：最短原子间距 / Å")
     p.add_argument("--out", default="")
     p.set_defaults(func=cmd_kmc_validate)
 
@@ -1438,10 +1646,11 @@ def main(argv=None):
     p.set_defaults(func=cmd_scan)
 
     p = sub.add_parser("ceds", help="CEDS 动态无序与迁移率–温度 (晶体局域势 MC + 耦合曲面 + TLT)")
-    p.add_argument("action", choices=["run", "local", "md", "snapshots", "validate", "al"],
+    p.add_argument("action", choices=["run", "local", "md", "snapshots", "validate", "al", "phonons"],
                    help="run: 局域 MC 计算 σ_V 与 μ(T)；local: 为晶体二聚体生成 DFT 局域扫描；md: 全晶体刚体 MD 计算 σ_V 与 μ(T)；"
                         "snapshots: 从 MD 轨迹取构型，生成逐帧直接计算的 ADF 批处理；validate: 快照结果与耦合曲面比较；"
-                        "al: 主动学习耦合曲面 (第一次运行写第 1 轮 ADF 批处理；算完后再次运行，拟合并写下一轮，直到收敛)")
+                        "al: 主动学习耦合曲面 (第一次运行写第 1 轮 ADF 批处理；算完后再次运行，拟合并写下一轮，直到收敛)；"
+                        "phonons: 刚体晶格动力学，各声子支对 σ_V 与迁移率的贡献 (杀手声子)")
     p.add_argument("--cif", required=True)
     p.add_argument("--project", help="扫描项目 (耦合曲面来源 / 局域扫描写入处)")
     p.add_argument("--monomer", help="刚性单体 (xyz / gjf / log 或 project.json)；默认取扫描项目的单体或晶体中的分子")
@@ -1487,6 +1696,20 @@ def main(argv=None):
     g.add_argument("--n-snap", type=int, default=120, help="snapshots：每个二聚体取多少个构型")
     g.add_argument("--md-half", action="store_true", help="local：按全晶体 MD 的涨落 (±k·σ) 确定局域扫描范围")
     g.add_argument("--md-k", type=float, default=3.0, help="local --md-half：范围取 ±k·σ_MD")
+    g = p.add_argument_group("phonons (声子分辨的动态无序；力场、--supercell、--md-charges、--md-rc 与 md 相同)")
+    g.add_argument("--ph-quantum", action="store_true", help="声子振幅用量子 (Bose–Einstein) 占据，默认经典 k_BT/ω²")
+    g.add_argument("--ph-htau-auto", action="store_true",
+                   help="TLT 的 ħ/τ 取声子估计 (σ² 加权的平均 ħω)，代替 --htau")
+    g.add_argument("--ph-gamma", action="store_true", help="另外给出只用 Γ 点的结果作对照")
+    g.add_argument("--ph-real", type=int, default=16, help="TLT 实现数 (各声子支贡献的数值微分用同一组随机数)")
+    g.add_argument("--ph-external", default="",
+                   help="外部 (DFT) 声子：phonopy 的 mesh.yaml / qpoints.yaml / band.yaml，需含本征矢 (--eigvecs)；"
+                        "网格需完整 (MESH_SYMMETRY = .FALSE.)，晶胞与 CIF 相同。CRYSTAL、VASP、QE 等经 phonopy 接口得到")
+    g.add_argument("--ph-structure", default="", help="--ph-external 文件中没有结构时 (qpoints.yaml)，给出 phonopy.yaml")
+    g.add_argument("--ph-length-unit", choices=["auto", "angstrom", "bohr"], default="auto",
+                   help="外部文件的长度单位 (auto：与 CIF 晶胞比较判断)")
+    g.add_argument("--ph-phase", choices=["positions", "cell"], default="positions",
+                   help="本征矢的相位约定：positions = phonopy (含原子分数坐标)；cell = 只含晶胞平移")
     g = p.add_argument_group("al (主动学习耦合曲面)")
     g.add_argument("--al-init", type=int, default=12, help="第 1 轮每个近邻对的构型数")
     g.add_argument("--al-abs", type=float, default=0.3,
@@ -1500,6 +1723,16 @@ def main(argv=None):
     g.add_argument("--al-delta", choices=["auto", "on", "off"], default="auto",
                    help="Δ-学习：GP 均值取 β₀ + β₁·V_EHT，只学习 DFT 与 EHT 之差 (新任务默认开启；已有任务保持原设置，"
                         "on / off 可切换)")
+    g.add_argument("--al-goal", choices=["auto", "sigma", "mu"], default="auto",
+                   help="选点与停止的目标：sigma = 各近邻对 σ_V 的区间 (默认)；mu = TLT 迁移率的区间，"
+                        "在全部近邻对中按 μ 的后验方差选点 (v1.21)。已有任务保持原设置，sigma / mu 可切换")
+    g.add_argument("--al-mu-target", type=float, default=None,
+                   help="--al-goal mu 的停止判据：μ 的 95%% 区间相对半宽 (默认 0.01)")
+    g.add_argument("--al-budget", type=int, nargs="?", const=40, default=0, metavar="N_BOOT",
+                   help="al：给出迁移率的误差预算 (曲面后验、热运动样本、TLT 实现数、ħ/τ、σ_E 各自的影响)；"
+                        "N_BOOT = 热运动样本的自助抽样次数 (默认 40)")
+    g.add_argument("--al-budget-sigma-e", default="",
+                   help='--al-budget 中位点能无序 σ_E / meV，空穴、电子 (如 "31,46"，来自 polar)')
     g.add_argument("--al-mu-draws", type=int, default=30,
                    help="收敛后把曲面不确定度传递到 TLT 迁移率的后验抽样次数 (0 = 不计算)")
     g.add_argument("--al-surfaces", default="", help="run / md：用这个主动学习任务拟合的 GP 曲面 (覆盖其它来源)")
@@ -1598,6 +1831,10 @@ def main(argv=None):
     p.add_argument("--lang", choices=["zh", "en"], help="界面语言 (默认使用上次的设置)")
     p.set_defaults(func=_gui)
 
+    _fill_missing_help(ap)
+    if i18n.CLI_LANG == "en":
+        _translate_parser(ap)
+    ap.epilog = "Chinese help and messages: python -m mobility_tool --lang zh <subcommand> ... (or MOBILIS_LANG=zh)"
     args = ap.parse_args(argv)
     args.func(args)
 

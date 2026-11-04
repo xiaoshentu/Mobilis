@@ -1,0 +1,22 @@
+[
+  {
+    "temperature_K": 298.15,
+    "lambda_eV": 0.2,
+    "dimension": 3,
+    "pathways": [
+      {
+        "name": "P1",
+        "r_A": 5.0,
+        "J_meV": 30.0,
+        "count": 2,
+        "k_s-1": 4829007570914.857,
+        "P": 0.5
+      }
+    ],
+    "D_cm2_s": 0.004024172975762381,
+    "mobility_cm2_Vs": 0.15662783237388367,
+    "D_DG_cm2_s": 0.0020120864878811905,
+    "mobility_DG_cm2_Vs": 0.07831391618694183,
+    "scalar_formula": "D = (1/2n) Σ m k r² (random walk); DG = Deng–Goddard (1/2n) Σ m k r² P, comparison only"
+  }
+]

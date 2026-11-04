@@ -1,0 +1,202 @@
+
+===== 1  KMC against exact solutions (12 cases)
+$ python -m mobility_tool kmc-validate --cif "../benchmark/1 structure/perylene.cif" --out kmc_validation.csv
+Test                                 Exact        KMC       Error     Dev. %      z
+A 1D chain μxx                    1.309      1.301    0.036   -0.56  -0.21
+B 2D (Ir-BB electron) μxx         26.23      26.91     0.69   +2.59  +0.99
+B 2D (Ir-BB electron) μyy          3.72      3.932    0.096   +5.71  +2.21
+B 2D (Ir-BB electron) μxy         2.485      2.717      0.2   +9.34  +1.14
+C 3D μzz (weak-coupling direction)     0.1603     0.1584   0.0039   -1.21  -0.49
+D crystal graph (multi-molecule cell) principal μ     0.1151     0.1187   0.0019   +3.11  +1.89
+E 1D chain T = 200 K             0.9142     0.8858     0.03   -3.10  -0.96
+E 1D chain T = 400 K              1.379      1.355    0.023   -1.70  -1.03
+F drift mobility (10⁴ V/cm) / Einstein      1.309      1.302    0.038   -0.55  -0.19
+G energetic disorder σ = 30 meV     0.5598     0.5526    0.014   -1.29  -0.51
+G energetic disorder σ = 60 meV    0.06183    0.06073    0.002   -1.78  -0.55
+G energetic disorder σ = 90 meV   0.003608   0.003762  0.00027   +4.24  +0.56
+Total 12 tests: max |z| 2.21, mean |deviation| 2.93%; all within 3 statistical errors
+Written kmc_validation.csv and comparison figure
+
+===== 2  1D chain: random walk vs Deng-Goddard / Wen
+$ python -m mobility_tool mobility --lam 0.2 --path 5.0,30,2 --json chain_1d.json
+
+T = 298.15 K   λ = 0.2000 eV   n = 3
+  Path              r/Å     J/meV    count       k/s^-1        P
+  P1            5.000    30.000     2   4.8290e+12   0.5000
+  Diffusion coefficient D = 4.0242e-03 cm^2/s   [random walk D = Σ k r²/2n]
+  Mobility   μ = 0.1566 cm^2/(V·s)
+  (comparison) Deng–Goddard D = Σ r²kP/2n: μ = 0.0783 cm^2/(V·s), lower by 2.0×
+
+Results written to chain_1d.json
+
+===== 3  anthracene: neighbour dimers and Gaussian inputs
+$ python -m mobility_tool crystal "../benchmark/1 structure/anthracene.cif" --cutoff 4.0 -o anthracene_inputs --program gaussian --method B3LYP --basis 6-31G(d) --nproc 16 --mem 32GB
+Cell contains 2 molecules, atoms [24, 24]
+Neighbours 14, equivalent groups 5
+  G1   count 4  centroid distance   5.228 Å  shortest atom distance  2.748 Å
+  G2   count 2  centroid distance   6.016 Å  shortest atom distance  2.813 Å
+  G3   count 4  centroid distance   9.894 Å  shortest atom distance  2.715 Å
+  G4   count 2  centroid distance  11.172 Å  shortest atom distance  2.647 Å
+  G5   count 2  centroid distance  12.689 Å  shortest atom distance  3.686 Å
+In anthracene_inputs exported the dimers and gaussian inputs; after the calculations use mobility --dimers anthracene_inputs to compute the mobility
+
+=====    anthracene: reorganization-energy inputs
+$ python -m mobility_tool reorg-gen anthracene_inputs/G1_A.gjf -o anthracene_inputs/reorg --name anthracene --carrier both
+In anthracene_inputs/reorg generated: anthracene_neutral.gjf, anthracene_cation.gjf, anthracene_anion.gjf and run_reorg.sh
+
+===== 4  anthracene: EHT couplings + crystal-graph KMC (holes)
+$ python -m mobility_tool kmc "../benchmark/1 structure/anthracene.cif" --lam 0.137 --carrier hole
+KMC (hole, marcus, EHT transfer integrals, sites 2, hops 6,000,000)
+Mobility principal values / cm²V⁻¹s⁻¹: 0.4388, 0.1688, 0.08651   mean 0.2314 ± 0.0067
+
+=====    anthracene: transient localization (holes)
+$ python -m mobility_tool tlt "../benchmark/1 structure/anthracene.cif" --carrier hole
+TLT (hole, σ/|J|=0.3, ħ/τ=5.0 meV, plane ab): μ principal values 6.428, 2.164 cm²/Vs, L ≈ 17.1 Å
+Tight-binding bandwidth 69.9 meV, effective mass 25.7, 13, 9.17 m_e
+
+===== 5  benchmark couplings (B3LYP / ZINDO / EHT, 26 groups)
+$ python ../benchmark/scripts/couplings.py
+naphthalene   G1 r  5.098  h: DFT   12.38 ZINDO    8.29 EHT    2.54   e: DFT   30.71 ZINDO   18.78 EHT   11.86
+naphthalene   G2 r  5.983  h: DFT   32.28 ZINDO   31.64 EHT    9.76   e: DFT   15.77 ZINDO    8.14 EHT    4.86
+naphthalene   G3 r  7.909  h: DFT   11.49 ZINDO    8.48 EHT    2.93   e: DFT    3.67 ZINDO    1.15 EHT    0.93
+naphthalene   G4 r  8.677  h: DFT    0.26 ZINDO    0.25 EHT    0.02   e: DFT    7.55 ZINDO    4.10 EHT    1.71
+naphthalene   G5 r 10.540  h: DFT    0.01 ZINDO    0.00 EHT    0.00   e: DFT    0.06 ZINDO    0.00 EHT    0.01
+anthracene    G1 r  5.228  h: DFT   21.89 ZINDO   25.29 EHT    9.90   e: DFT   60.86 ZINDO   35.31 EHT   21.00
+anthracene    G2 r  6.016  h: DFT   42.93 ZINDO   41.37 EHT   14.52   e: DFT   38.58 ZINDO   24.37 EHT   13.61
+anthracene    G3 r  9.894  h: DFT   12.93 ZINDO    8.86 EHT    3.38   e: DFT    2.54 ZINDO    1.26 EHT    0.84
+anthracene    G4 r 11.172  h: DFT    0.02 ZINDO    0.37 EHT    0.00   e: DFT    1.04 ZINDO    1.70 EHT    0.44
+anthracene    G5 r 12.689  h: DFT    0.02 ZINDO    0.00 EHT    0.00   e: DFT    0.05 ZINDO    0.00 EHT    0.00
+perylene      G1 r  3.887  h: DFT   35.45 ZINDO   29.81 EHT   11.10   e: DFT   63.47 ZINDO   79.89 EHT   42.97
+perylene      G2 r  6.102  h: DFT   15.09 ZINDO   15.72 EHT    5.70   e: DFT   36.76 ZINDO   15.78 EHT    9.70
+perylene      G3 r  6.476  h: DFT   25.98 ZINDO   22.35 EHT    8.54   e: DFT   26.22 ZINDO   10.71 EHT    6.95
+perylene      G4 r  8.100  h: DFT    2.57 ZINDO    0.97 EHT    0.87   e: DFT   45.76 ZINDO   20.42 EHT   10.69
+perylene      G5 r 10.263  h: DFT    0.67 ZINDO    2.11 EHT    0.96   e: DFT    7.92 ZINDO    5.46 EHT    2.99
+perylene      G6 r 10.788  h: DFT    8.57 ZINDO    4.80 EHT    2.08   e: DFT    3.71 ZINDO    0.89 EHT    0.66
+perylene      G7 r 11.017  h: DFT    5.87 ZINDO    3.03 EHT    1.30   e: DFT    6.98 ZINDO    2.07 EHT    1.39
+perylene      G8 r 11.408  h: DFT    1.15 ZINDO    0.38 EHT    0.07   e: DFT    1.56 ZINDO    0.28 EHT    0.16
+perylene      G9 r 12.698  h: DFT    0.02 ZINDO    0.00 EHT    0.00   e: DFT    0.03 ZINDO    0.00 EHT    0.00
+phenanthrene  G1 r  5.098  h: DFT   64.10 ZINDO   64.06 EHT   23.62   e: DFT   22.24 ZINDO    6.60 EHT    4.34
+phenanthrene  G2 r  5.344  h: DFT   49.31 ZINDO   60.17 EHT   16.22   e: DFT   14.30 ZINDO    5.20 EHT    3.95
+phenanthrene  G3 r  6.140  h: DFT   38.31 ZINDO   49.56 EHT   14.43   e: DFT   46.36 ZINDO   30.65 EHT   19.24
+phenanthrene  G4 r  9.438  h: DFT    4.23 ZINDO    3.80 EHT    1.69   e: DFT    7.38 ZINDO    2.44 EHT    1.69
+phenanthrene  G5 r 10.213  h: DFT    0.00 ZINDO    0.27 EHT    0.43   e: DFT    0.90 ZINDO    0.05 EHT    0.26
+phenanthrene  G6 r 10.311  h: DFT    0.22 ZINDO    0.13 EHT    0.81   e: DFT    0.78 ZINDO    0.09 EHT    0.13
+phenanthrene  G7 r 11.259  h: DFT    0.02 ZINDO    0.01 EHT    0.01   e: DFT    0.04 ZINDO    0.00 EHT    0.00
+
+=====    benchmark mobility tensors (108 combinations)
+$ python ../benchmark/scripts/models.py
+EHT scale factors {'hole': 2.8659181076972464, 'electron': 2.1440063824790605}
+naphthalene  hole     DFT   marcus wen    aa   0.006 bb   0.310 cc   0.015  rms log10 1.63
+naphthalene  hole     DFT   marcus rw     aa   0.134 bb   1.071 cc   0.355  rms log10 0.62
+naphthalene  hole     DFT   marcus exact  aa   0.134 bb   1.071 cc   0.355  rms log10 0.62
+naphthalene  hole     DFT   mlj    wen    aa   0.037 bb   1.795 cc   0.084  rms log10 1.02
+naphthalene  hole     DFT   mlj    rw     aa   0.776 bb   6.199 cc   2.056  rms log10 0.45
+naphthalene  hole     DFT   mlj    exact  aa   0.776 bb   6.199 cc   2.056  rms log10 0.45
+naphthalene  hole     ZINDO marcus wen    aa   0.002 bb   0.355 cc   0.005  rms log10 2.02
+naphthalene  hole     ZINDO marcus rw     aa   0.060 bb   0.968 cc   0.193  rms log10 0.87
+naphthalene  hole     ZINDO marcus exact  aa   0.060 bb   0.968 cc   0.193  rms log10 0.87
+naphthalene  hole     ZINDO mlj    wen    aa   0.009 bb   2.054 cc   0.031  rms log10 1.44
+naphthalene  hole     ZINDO mlj    rw     aa   0.349 bb   5.605 cc   1.119  rms log10 0.52
+naphthalene  hole     ZINDO mlj    exact  aa   0.349 bb   5.605 cc   1.119  rms log10 0.52
+naphthalene  hole     EHT   marcus wen    aa   0.001 bb   0.270 cc   0.006  rms log10 2.13
+naphthalene  hole     EHT   marcus rw     aa   0.047 bb   0.763 cc   0.190  rms log10 0.96
+naphthalene  hole     EHT   marcus exact  aa   0.047 bb   0.763 cc   0.190  rms log10 0.96
+naphthalene  hole     EHT   mlj    wen    aa   0.007 bb   1.565 cc   0.038  rms log10 1.52
+naphthalene  hole     EHT   mlj    rw     aa   0.270 bb   4.414 cc   1.097  rms log10 0.52
+naphthalene  hole     EHT   mlj    exact  aa   0.270 bb   4.414 cc   1.097  rms log10 0.52
+naphthalene  electron DFT   marcus wen    aa   0.071 bb   0.043 cc   0.000  rms log10 1.91
+naphthalene  electron DFT   marcus rw     aa   0.348 bb   0.271 cc   0.047  rms log10 0.60
+naphthalene  electron DFT   marcus exact  aa   0.348 bb   0.271 cc   0.047  rms log10 0.60
+naphthalene  electron DFT   mlj    wen    aa   0.653 bb   0.389 cc   0.004  rms log10 1.15
+naphthalene  electron DFT   mlj    rw     aa   3.183 bb   2.479 cc   0.426  rms log10 0.54
+naphthalene  electron DFT   mlj    exact  aa   3.183 bb   2.479 cc   0.426  rms log10 0.54
+naphthalene  electron ZINDO marcus wen    aa   0.028 bb   0.016 cc   0.000  rms log10 2.40
+naphthalene  electron ZINDO marcus rw     aa   0.129 bb   0.091 cc   0.011  rms log10 1.10
+naphthalene  electron ZINDO marcus exact  aa   0.129 bb   0.091 cc   0.011  rms log10 1.10
+naphthalene  electron ZINDO mlj    wen    aa   0.256 bb   0.144 cc   0.001  rms log10 1.58
+naphthalene  electron ZINDO mlj    rw     aa   1.181 bb   0.830 cc   0.099  rms log10 0.40
+naphthalene  electron ZINDO mlj    exact  aa   1.181 bb   0.830 cc   0.099  rms log10 0.40
+naphthalene  electron EHT   marcus wen    aa   0.052 bb   0.029 cc   0.000  rms log10 2.51
+naphthalene  electron EHT   marcus rw     aa   0.232 bb   0.162 cc   0.012  rms log10 0.98
+naphthalene  electron EHT   marcus exact  aa   0.232 bb   0.162 cc   0.012  rms log10 0.98
+naphthalene  electron EHT   mlj    wen    aa   0.477 bb   0.265 cc   0.000  rms log10 1.76
+naphthalene  electron EHT   mlj    rw     aa   2.128 bb   1.480 cc   0.108  rms log10 0.50
+naphthalene  electron EHT   mlj    exact  aa   2.128 bb   1.480 cc   0.108  rms log10 0.50
+anthracene   hole     DFT   marcus wen    aa   0.064 bb   0.941 cc   0.035  rms log10 1.11
+anthracene   hole     DFT   marcus rw     aa   0.877 bb   3.627 cc   1.309  rms log10 0.14
+anthracene   hole     DFT   marcus exact  aa   0.877 bb   3.627 cc   1.309  rms log10 0.14
+anthracene   hole     DFT   mlj    wen    aa   0.264 bb   3.905 cc   0.145  rms log10 0.58
+anthracene   hole     DFT   mlj    rw     aa   3.640 bb  15.049 cc   5.430  rms log10 0.69
+anthracene   hole     DFT   mlj    exact  aa   3.640 bb  15.049 cc   5.430  rms log10 0.69
+anthracene   hole     ZINDO marcus wen    aa   0.110 bb   0.834 cc   0.008  rms log10 1.35
+anthracene   hole     ZINDO marcus rw     aa   1.113 bb   3.467 cc   0.615  rms log10 0.09
+anthracene   hole     ZINDO marcus exact  aa   1.113 bb   3.467 cc   0.615  rms log10 0.09
+anthracene   hole     ZINDO mlj    wen    aa   0.457 bb   3.462 cc   0.032  rms log10 0.85
+anthracene   hole     ZINDO mlj    rw     aa   4.618 bb  14.383 cc   2.553  rms log10 0.60
+anthracene   hole     ZINDO mlj    exact  aa   4.618 bb  14.383 cc   2.553  rms log10 0.60
+anthracene   hole     EHT   marcus wen    aa   0.156 bb   0.789 cc   0.010  rms log10 1.27
+anthracene   hole     EHT   marcus rw     aa   1.400 bb   3.653 cc   0.736  rms log10 0.08
+anthracene   hole     EHT   marcus exact  aa   1.400 bb   3.653 cc   0.736  rms log10 0.08
+anthracene   hole     EHT   mlj    wen    aa   0.647 bb   3.275 cc   0.041  rms log10 0.77
+anthracene   hole     EHT   mlj    rw     aa   5.808 bb  15.158 cc   3.052  rms log10 0.66
+anthracene   hole     EHT   mlj    exact  aa   5.808 bb  15.158 cc   3.052  rms log10 0.66
+anthracene   electron DFT   marcus wen    aa   0.603 bb   0.394 cc   0.000  rms log10 2.71
+anthracene   electron DFT   marcus rw     aa   2.901 bb   2.589 cc   0.025  rms log10 0.72
+anthracene   electron DFT   marcus exact  aa   2.901 bb   2.589 cc   0.025  rms log10 0.72
+anthracene   electron DFT   mlj    wen    aa   3.808 bb   2.492 cc   0.000  rms log10 2.24
+anthracene   electron DFT   mlj    rw     aa  18.335 bb  16.364 cc   0.160  rms log10 0.92
+anthracene   electron DFT   mlj    exact  aa  18.335 bb  16.364 cc   0.160  rms log10 0.92
+anthracene   electron ZINDO marcus wen    aa   0.197 bb   0.141 cc   0.000  rms log10 2.98
+anthracene   electron ZINDO marcus rw     aa   0.979 bb   0.943 cc   0.011  rms log10 0.90
+anthracene   electron ZINDO marcus exact  aa   0.979 bb   0.943 cc   0.011  rms log10 0.90
+anthracene   electron ZINDO mlj    wen    aa   1.243 bb   0.894 cc   0.000  rms log10 2.42
+anthracene   electron ZINDO mlj    rw     aa   6.185 bb   5.963 cc   0.070  rms log10 0.68
+anthracene   electron ZINDO mlj    exact  aa   6.185 bb   5.963 cc   0.070  rms log10 0.68
+anthracene   electron EHT   marcus wen    aa   0.327 bb   0.219 cc   0.000  rms log10 2.94
+anthracene   electron EHT   marcus rw     aa   1.588 bb   1.446 cc   0.013  rms log10 0.85
+anthracene   electron EHT   marcus exact  aa   1.588 bb   1.446 cc   0.013  rms log10 0.85
+anthracene   electron EHT   mlj    wen    aa   2.069 bb   1.385 cc   0.000  rms log10 2.42
+anthracene   electron EHT   mlj    rw     aa  10.039 bb   9.139 cc   0.084  rms log10 0.78
+anthracene   electron EHT   mlj    exact  aa  10.039 bb   9.139 cc   0.084  rms log10 0.78
+perylene     electron DFT   marcus wen    aa   0.318 bb   0.652 cc   0.026  rms log10 0.94
+perylene     electron DFT   marcus rw     aa   1.959 bb   3.228 cc   0.458  rms log10 0.19
+perylene     electron DFT   marcus exact  aa   1.812 bb   3.053 cc   0.377  rms log10 0.18
+perylene     electron DFT   mlj    wen    aa   1.699 bb   3.481 cc   0.138  rms log10 0.22
+perylene     electron DFT   mlj    rw     aa  10.463 bb  17.242 cc   2.447  rms log10 0.73
+perylene     electron DFT   mlj    exact  aa   9.680 bb  16.306 cc   2.015  rms log10 0.68
+perylene     electron ZINDO marcus wen    aa   0.389 bb   0.769 cc   0.063  rms log10 0.76
+perylene     electron ZINDO marcus rw     aa   0.758 bb   1.395 cc   0.185  rms log10 0.45
+perylene     electron ZINDO marcus exact  aa   0.341 bb   0.928 cc   0.104  rms log10 0.70
+perylene     electron ZINDO mlj    wen    aa   2.079 bb   4.108 cc   0.336  rms log10 0.10
+perylene     electron ZINDO mlj    rw     aa   4.049 bb   7.448 cc   0.990  rms log10 0.36
+perylene     electron ZINDO mlj    exact  aa   1.820 bb   4.956 cc   0.556  rms log10 0.19
+perylene     electron EHT   marcus wen    aa   0.509 bb   0.992 cc   0.081  rms log10 0.65
+perylene     electron EHT   marcus rw     aa   1.126 bb   1.906 cc   0.264  rms log10 0.32
+perylene     electron EHT   marcus exact  aa   0.609 bb   1.312 cc   0.155  rms log10 0.51
+perylene     electron EHT   mlj    wen    aa   2.719 bb   5.296 cc   0.433  rms log10 0.13
+perylene     electron EHT   mlj    rw     aa   6.014 bb  10.180 cc   1.408  rms log10 0.50
+perylene     electron EHT   mlj    exact  aa   3.253 bb   7.008 cc   0.827  rms log10 0.30
+phenanthrene hole     DFT   marcus wen    aa   0.317 bb   0.239 cc   0.000  rms log10 2.58
+phenanthrene hole     DFT   marcus rw     aa   1.484 bb   1.516 cc   0.021  rms log10 1.28
+phenanthrene hole     DFT   marcus exact  aa   1.411 bb   1.516 cc   0.020  rms log10 1.29
+phenanthrene hole     DFT   mlj    wen    aa   4.112 bb   3.102 cc   0.003  rms log10 1.69
+phenanthrene hole     DFT   mlj    rw     aa  19.262 bb  19.674 cc   0.275  rms log10 0.63
+phenanthrene hole     DFT   mlj    exact  aa  18.310 bb  19.674 cc   0.264  rms log10 0.63
+phenanthrene hole     ZINDO marcus wen    aa   0.336 bb   0.324 cc   0.000  rms log10 2.56
+phenanthrene hole     ZINDO marcus rw     aa   1.778 bb   2.143 cc   0.017  rms log10 1.28
+phenanthrene hole     ZINDO marcus exact  aa   1.776 bb   2.143 cc   0.016  rms log10 1.30
+phenanthrene hole     ZINDO mlj    wen    aa   4.367 bb   4.205 cc   0.003  rms log10 1.68
+phenanthrene hole     ZINDO mlj    rw     aa  23.072 bb  27.819 cc   0.227  rms log10 0.72
+phenanthrene hole     ZINDO mlj    exact  aa  23.056 bb  27.819 cc   0.213  rms log10 0.73
+phenanthrene hole     EHT   marcus wen    aa   0.334 bb   0.269 cc   0.000  rms log10 2.54
+phenanthrene hole     EHT   marcus rw     aa   1.520 bb   1.660 cc   0.036  rms log10 1.15
+phenanthrene hole     EHT   marcus exact  aa   1.358 bb   1.660 cc   0.035  rms log10 1.17
+phenanthrene hole     EHT   mlj    wen    aa   4.332 bb   3.491 cc   0.003  rms log10 1.65
+phenanthrene hole     EHT   mlj    rw     aa  19.729 bb  21.544 cc   0.461  rms log10 0.54
+phenanthrene hole     EHT   mlj    exact  aa  17.619 bb  21.544 cc   0.448  rms log10 0.53
+
+=====    Figures 4, 6 and 7
+$ python ../benchmark/scripts/make_figs.py
+(a) tensor estimator (DFT, Marcus) {'Wen': 1.95, 'corrected': 0.71, 'exact (KMC)': 0.71}
+(b) couplings (Marcus, exact) {'B3LYP': 0.71, 'ZINDO': 0.91, 'EHT scaled': 0.83}
+(c) rate (B3LYP, exact) {'Marcus': 0.71, 'MLJ': 0.68}

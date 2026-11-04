@@ -18,6 +18,7 @@
 接口与 ceds 的其它曲面相同：surface(Q, carrier) → V (meV)；coverage(Q)；describe()。
 """
 import numpy as np
+from pathlib import Path
 from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.optimize import minimize
 
@@ -429,10 +430,13 @@ class ALRun:
 
     # ---- 第 1 轮
     def start(self, ceds, configs, level, T, n_thermal=300, init=12, batch=10, target=0.03, k_half=2.5, seed=0,
-              info=None, seeds=(), abs_floor=ABS_FLOOR, delta=True):
+              info=None, seeds=(), abs_floor=ABS_FLOOR, delta=True, goal="sigma", mu_target=0.01, hbar_tau=0.005):
         """configs: rigidmd.snapshot_configs 的结果 (group = 组号)。写第 1 轮扫描并保存状态。
         seeds: 项目中已有扫描的名称 (如先前的局部扫描)；其中已算完的构型直接作为训练数据，
-        已有足够数据的近邻对第 1 轮直接按 IMSE 补点 (或已收敛则不再计算)。"""
+        已有足够数据的近邻对第 1 轮直接按 IMSE 补点 (或已收敛则不再计算)。
+        goal: "sigma" — 每个近邻对按 σ_V 的区间判断收敛、各自用 IMSE 选点；
+              "mu"    — 以 TLT 迁移率为目标：μ 的 95% 区间半宽 ≤ mu_target 时停止，每轮在全部近邻对中
+                        按 μ 的后验方差共选 batch × 近邻对数 个点 (见 MuGoal)。"""
         if self.exists:
             raise ValueError(f"主动学习任务 {self.name} 已经存在 ({self.state_path})")
         rng = np.random.default_rng(seed)
@@ -456,7 +460,8 @@ class ALRun:
                       "half": {str(g): h for g, h in halves.items()}, "init": init, "batch": batch, "target": target,
                       "rounds": [], "converged": {}, "history": [], "info": info or {}, "seeds": list(seeds),
                       "mirror": {str(g): m for g, m in mirror.items()}, "abs_floor": float(abs_floor),
-                      "delta": bool(delta)}
+                      "delta": bool(delta), "goal": goal, "mu_target": float(mu_target),
+                      "hbar_tau": float(hbar_tau)}
         if seeds:
             recs = self._seed_records()[0]
             if any(len(recs.get(g, [])) >= 4 for g in pools):
@@ -471,9 +476,7 @@ class ALRun:
             sel[g] = select_spread(Q, c0, halves[g], min(init, len(Q)))
         return self._write_round(sel)
 
-    def _write_round(self, sel):
-        k = len(self.state["rounds"]) + 1
-        scan = f"{self.name}_r{k}"
+    def _round_configs(self, sel):
         pools, _ = self.pool()
         cfgs = []
         from .scanflow import make_cfg
@@ -483,6 +486,33 @@ class ALRun:
                 mir = {"mirror": 1} if self.state.get("mirror", {}).get(str(g)) else {}
                 cfgs.append(dict(make_cfg(*q[:3], gamma=q[3], pitch=q[4], roll=q[5], **mir), set="al", group=str(g),
                                  variant=f"pool{int(i)}"))
+        return cfgs
+
+    def rebuild_missing(self):
+        """某一轮的扫描目录被删除 (或缺 manifest.csv) 时按保存的选点重新写出该轮 (构型与编号与原来相同)。
+        目录还在但缺 manifest 时先改名保留。返回重建的扫描名称列表。"""
+        import shutil
+        import time
+        out = []
+        for k, r in enumerate(self.state["rounds"], 1):
+            name = r["scan"]
+            d = Path(self.proj.root) / "scans" / name
+            if (d / "manifest.csv").exists():
+                continue
+            if d.exists():
+                shutil.move(str(d), str(d.with_name(f"{name}_broken_{time.strftime('%Y%m%d%H%M%S')}")))
+            self.proj.meta["scans"].pop(name, None)
+            self.proj.save()
+            sel = {int(g): idx for g, idx in r["selected"].items()}
+            self.proj.add_scan(name, self._round_configs(sel), self.state["level"], kind="al", reduce=False,
+                               clash_min=0.0, info={"al": self.name, "round": k})
+            out.append(name)
+        return out
+
+    def _write_round(self, sel):
+        k = len(self.state["rounds"]) + 1
+        scan = f"{self.name}_r{k}"
+        cfgs = self._round_configs(sel)
         info = self.proj.add_scan(scan, cfgs, self.state["level"], kind="al", reduce=False, clash_min=0.0,
                                   info={"al": self.name, "round": k})
         self.state["rounds"].append({"scan": scan, "selected": {str(g): [int(i) for i in idx] for g, idx in sel.items()}})
@@ -531,6 +561,16 @@ class ALRun:
     def delta(self):
         """Δ-学习 (EHT 基线)。v1.20 以前建立的任务没有此项，按原来的常数均值 GP 处理。"""
         return bool(self.state.get("delta", False))
+
+    @property
+    def goal(self):
+        return self.state.get("goal", "sigma")
+
+    def set_goal(self, goal, mu_target=None):
+        self.state["goal"] = goal
+        if mu_target is not None:
+            self.state["mu_target"] = float(mu_target)
+        self._save()
 
     def set_delta(self, on):
         self.state["delta"] = bool(on)
@@ -582,6 +622,9 @@ class ALRun:
         for r in self.state["rounds"]:
             for g, idx in r["selected"].items():
                 used.setdefault(int(g), set()).update(idx)
+        goal_mu = self.goal == "mu"
+        fitted = {}
+        self.last_mu = None
         for g in self.state["pairs"]:
             rs = recs.get(g, [])
             row = {"gid": g, "n": len(rs)}
@@ -597,6 +640,7 @@ class ALRun:
                 sel[g] = [free[i] for i in pick]
                 continue
             s = self.surface(ceds, g, rs)
+            fitted[g] = s
             ok = True
             for c in ("hole", "electron"):
                 u = s.stat_uncertainty(thermal[g], c)
@@ -606,6 +650,10 @@ class ALRun:
                 floor = float(self.state.get("abs_floor", ABS_FLOOR))
                 # 相对判据对很弱的耦合 (σ_V < 1 meV) 没有意义：区间半宽小于绝对下限 (默认 0.3 meV) 也算收敛
                 ok &= (u["std_rel"] <= tgt or half_std <= floor) and half_mean <= max(tgt * abs(u["mean"]), floor, 1.0)
+            if goal_mu:
+                row["status"] = "—"
+                rows.append(row)
+                continue
             row["status"] = "收敛" if ok else "继续"
             rows.append(row)
             if ok:
@@ -613,6 +661,24 @@ class ALRun:
             else:
                 self.state["converged"].pop(str(g), None)
                 sel[g] = select_batch(s, pools[g], thermal[g], k=self.state["batch"], exclude=sorted(used.get(g, set())))
+        if goal_mu and not sel:                         # 全部近邻对都有数据：按 μ 判断与选点
+            T = float(self.state["T"])
+            ht = float(self.state.get("hbar_tau", 0.005))
+            mg = MuGoal(ceds, fitted, thermal, T, ht)
+            half = mg.half_width()
+            tgt_mu = float(self.state.get("mu_target", 0.01))
+            ok = all(h <= tgt_mu for h in half.values())
+            self.last_mu = {"mu": mg.mu0, "half": half, "target": tgt_mu, "converged": ok}
+            for row in rows:
+                row["status"] = "收敛" if ok else "继续"
+                if ok:
+                    self.state["converged"][str(row["gid"])] = row["n"]
+            if not ok:
+                k = int(self.state["batch"]) * len(fitted)
+                ex = {g: sorted(used.get(g, set())) for g in fitted}
+                sel = mg.select(pools, k, exclude=ex)
+            self.state.setdefault("mu_history", []).append(
+                {"n": {str(g): r["n"] for g, r in ((r["gid"], r) for r in rows)}, **self.last_mu})
         self.state["history"].append([{k: (v if not isinstance(v, dict) else {kk: vv for kk, vv in v.items()})
                                        for k, v in r.items()} for r in rows])
         sel = {g: idx for g, idx in sel.items() if idx}
@@ -654,6 +720,179 @@ def mu_posterior(ceds, surfaces, thermal, T, hbar_tau=0.005, n_draws=30, n_real=
         out[c] = {"mu": mu0, "lo": float(np.percentile(vals, 2.5)), "hi": float(np.percentile(vals, 97.5)),
                   "draws": vals}
     return out
+
+
+
+# ----------------------------------------------------------------------------------------------
+# 以迁移率为目标的选点 (v1.21)
+# ----------------------------------------------------------------------------------------------
+def _tlt_mu(ceds, stat, carrier, T, hbar_tau, n_real=12, seed=1, sigma_E=0.0):
+    """stat: {组号: (⟨V⟩, σ_V)} (meV) → TLT 主方向迁移率。"""
+    res = {g: {"T": T, carrier: {"mean": m, "std": s}} for g, (m, s) in stat.items()}
+    return float(ceds.tlt(res, carrier, T, hbar_tau, n_real=n_real, seed=seed, sigma_E=sigma_E)["mu_principal"][0])
+
+
+def mu_sensitivity(ceds, stat, T, hbar_tau=0.005, carriers=CARRIERS, n_real=12):
+    """dμ/d⟨V⟩_g 与 dμ/dσ_g (中心差分，各次 TLT 用相同的随机数)。
+    stat: {组号: {载流子: (⟨V⟩, σ_V)}}。返回 {载流子: (μ0, {组号: (dμ/d⟨V⟩, dμ/dσ)})} (cm²/Vs/meV)。"""
+    out = {}
+    for c in carriers:
+        base = {g: tuple(stat[g][c][:2]) for g in stat}
+        mu0 = _tlt_mu(ceds, base, c, T, hbar_tau, n_real)
+        d = {}
+        for g, (m, sd) in base.items():
+            hm, hs = max(0.02 * abs(m), 0.5), max(0.02 * sd, 0.2)
+            f = lambda mm, ss: _tlt_mu(ceds, {**base, g: (mm, ss)}, c, T, hbar_tau, n_real)  # noqa: E731
+            dm = (f(m + hm, sd) - f(m - hm, sd)) / (2 * hm)
+            ds = (f(m, sd + hs) - f(m, max(sd - hs, 1e-3))) / (sd + hs - max(sd - hs, 1e-3))
+            d[g] = (float(dm), float(ds))
+        out[c] = (float(mu0), d)
+    return out
+
+
+class MuGoal:
+    """把各近邻对耦合曲面的后验不确定度线性化地传递到 TLT 迁移率，并按 μ 的后验方差选点。
+
+    热运动样本上 f = V(q_i)：⟨V⟩ = Σf/N，σ_V = std(f)，于是 δμ ≈ Σ_g w_gᵀ δf_g，
+    w_g = (dμ/d⟨V⟩)/N + (dμ/dσ)(f − ⟨V⟩)/((N−1)σ_V)，var μ = Σ_g w_gᵀ C_g w_g (C_g 为放大后的后验协方差)。
+    在候选点 j 增加一个 DFT 点使 var μ 下降 (C_jt w)² / (C_jj + σ_n²)；在全部近邻对的候选池中贪心选点，
+    每选一个点做秩一更新。两种载流子的相对方差相加。"""
+
+    def __init__(self, ceds, surfaces, thermal, T, hbar_tau=0.005, carriers=CARRIERS, n_real=12,
+                 max_thermal=200, seed=0):
+        rng = np.random.default_rng(seed)
+        self.surfaces, self.carriers = surfaces, carriers
+        self.Q = {}
+        for g, s in surfaces.items():
+            Q = np.atleast_2d(thermal[g])
+            if len(Q) > max_thermal:
+                Q = Q[rng.choice(len(Q), max_thermal, replace=False)]
+            self.Q[g] = Q
+        self.f = {(g, c): np.asarray(s(self.Q[g], c), float) for g, s in surfaces.items() for c in carriers}
+        stat = {g: {c: (float(self.f[g, c].mean()), float(self.f[g, c].std(ddof=1))) for c in carriers}
+                for g in surfaces}
+        self.stat = stat
+        self.sens = mu_sensitivity(ceds, stat, T, hbar_tau, carriers, n_real)
+        self.mu0 = {c: self.sens[c][0] for c in carriers}
+        self.w = {}
+        for (g, c), f in self.f.items():
+            m, sd = stat[g][c]
+            dm, ds = self.sens[c][1][g]
+            N = len(f)
+            self.w[g, c] = dm / N + ds * (f - m) / ((N - 1) * max(sd, 1e-9))
+
+    def variance(self):
+        """线性化的 μ 后验方差 {载流子: var} (已含 CI 放大)。"""
+        out = {c: 0.0 for c in self.carriers}
+        for (g, c), w in self.w.items():
+            s = self.surfaces[g]
+            U = s.scale(self.Q[g])
+            H = s.H(self.Q[g], c)
+            C = s.gp[c].post_cov(U, U, H, H) * s.inflate ** 2
+            out[c] += float(w @ C @ w)
+        return out
+
+    def half_width(self):
+        """μ 的 95% 区间相对半宽 {载流子: 1.96·sd/μ}。"""
+        return {c: 1.96 * np.sqrt(max(v, 0.0)) / max(abs(self.mu0[c]), 1e-12) for c, v in self.variance().items()}
+
+    def select(self, pools, k, exclude=None, max_per_pair=None):
+        """从各近邻对的候选池 pools {组号: (n, 6)} 中共选 k 个点。exclude: {组号: 已用下标}；max_per_pair: 每对最多的点数
+        (数或 {组号: 数})。返回 {组号: [下标]}。"""
+        exclude = {g: set(int(i) for i in (exclude or {}).get(g, ())) for g in self.surfaces}
+        st = {}
+        for (g, c), w in self.w.items():
+            s = self.surfaces[g]
+            P = np.atleast_2d(pools[g])
+            Up, Ut = s.scale(P), s.scale(self.Q[g])
+            Hp, Ht = s.H(P, c), s.H(self.Q[g], c)
+            k2 = s.inflate ** 2
+            Cpt = s.gp[c].post_cov(Up, Ut, Hp, Ht) * k2
+            Cpp = s.gp[c].post_cov(Up, Up, Hp, Hp) * k2
+            st[g, c] = [Cpt @ w, Cpp, s.gp[c].noise ** 2 * k2, self.mu0[c] ** 2]
+        chosen = {g: [] for g in self.surfaces}
+        for _ in range(int(k)):
+            best = None
+            for g in self.surfaces:
+                lim = max_per_pair.get(g) if isinstance(max_per_pair, dict) else max_per_pair
+                if lim and len(exclude[g]) + len(chosen[g]) >= lim:
+                    continue
+                score = None
+                for c in self.carriers:
+                    a, Cpp, n2, mu2 = st[g, c]
+                    sc = a ** 2 / (np.clip(np.diag(Cpp), 1e-12, None) + n2) / max(mu2, 1e-24)
+                    score = sc if score is None else score + sc
+                for i in exclude[g].union(chosen[g]):
+                    score[i] = -np.inf
+                j = int(np.argmax(score))
+                if np.isfinite(score[j]) and (best is None or score[j] > best[0]):
+                    best = (float(score[j]), g, j)
+            if best is None:
+                break
+            _, g, j = best
+            chosen[g].append(j)
+            for c in self.carriers:
+                a, Cpp, n2, mu2 = st[g, c]
+                d = Cpp[j, j] + n2
+                st[g, c] = [a - Cpp[:, j] * a[j] / d, Cpp - np.outer(Cpp[:, j], Cpp[j]) / d, n2, mu2]
+        return {g: v for g, v in chosen.items() if v}
+
+
+
+def error_budget(ceds, surfaces, thermal, T, hbar_tau=0.005, carriers=CARRIERS, sigma_E=None, htau_alt=(0.002, 0.010),
+                 n_boot=100, n_seeds=10, n_real=24, seed=0, on_progress=None):
+    """TLT 迁移率的误差预算：每一项只改变一个因素。
+    数值项 (95% 区间相对半宽)：耦合曲面后验 (线性化，含 CI 放大)、热运动样本数 (自助抽样)、TLT 无序实现数 (换种子)；
+    参数 / 模型项 (μ 之比)：其它 ħ/τ、位点能无序 σ_E (sigma_E = {载流子: eV})。
+    返回 {"mu": {载流子: μ0}, "rows": [{name, kind, 载流子: {half | ratio}}]}。"""
+    rng = np.random.default_rng(seed)
+    say = on_progress or (lambda s: None)
+    F = {g: {c: np.asarray(s(np.atleast_2d(thermal[g]), c), float) for c in carriers} for g, s in surfaces.items()}
+
+    def st(FF, c):
+        return {g: (float(FF[g][c].mean()), float(FF[g][c].std(ddof=1))) for g in FF}
+
+    mu0 = {c: _tlt_mu(ceds, st(F, c), c, T, hbar_tau, n_real) for c in carriers}
+    rows = []
+    say("耦合曲面后验")
+    mg = MuGoal(ceds, surfaces, thermal, T, hbar_tau, carriers, n_real=12, max_thermal=10 ** 9)
+    rows.append({"name": "耦合曲面 (后验)", "kind": "num", **{c: {"half": h} for c, h in mg.half_width().items()}})
+    say("热运动样本 (自助抽样)")
+    b = {c: [] for c in carriers}
+    for _ in range(n_boot):
+        FF = {g: {c: v[c][rng.integers(0, len(v[c]), len(v[c]))] for c in carriers} for g, v in F.items()}
+        for c in carriers:
+            b[c].append(_tlt_mu(ceds, st(FF, c), c, T, hbar_tau, n_real))
+    rows.append({"name": f"热运动样本 (每对 {min(len(v) for v in thermal.values())} 个)", "kind": "num",
+                 **{c: {"half": float((np.percentile(b[c], 97.5) - np.percentile(b[c], 2.5)) / 2 / mu0[c])}
+                    for c in carriers}})
+    say("TLT 无序实现")
+    row = {"name": f"TLT 无序实现 ({n_real} 个)", "kind": "num"}
+    for c in carriers:
+        x = [_tlt_mu(ceds, st(F, c), c, T, hbar_tau, n_real, seed=k) for k in range(1, n_seeds + 1)]
+        row[c] = {"half": float(1.96 * np.std(x, ddof=1) / np.mean(x))}
+    rows.append(row)
+    for ht in htau_alt:
+        rows.append({"name": f"ħ/τ = {1000 * ht:g} meV", "kind": "param",
+                     **{c: {"ratio": _tlt_mu(ceds, st(F, c), c, T, ht, n_real) / mu0[c]} for c in carriers}})
+    if sigma_E:
+        rows.append({"name": "位点能无序 σ_E = " + " / ".join(f"{1000 * sigma_E[c]:.0f}" for c in carriers if c in sigma_E)
+                     + " meV", "kind": "model",
+                     **{c: {"ratio": _tlt_mu(ceds, st(F, c), c, T, hbar_tau, n_real, sigma_E=sigma_E.get(c, 0.0)) / mu0[c]}
+                        for c in carriers}})
+    return {"mu": mu0, "rows": rows}
+
+
+def budget_report(b, carriers=CARRIERS):
+    L = [f"{'来源':<28}" + "".join(f"{('空穴' if c == 'hole' else '电子') + ' μ':>16}" for c in carriers),
+         f"{'(中心值 cm²/Vs)':<28}" + "".join(f"{b['mu'][c]:>16.3g}" for c in carriers)]
+    for r in b["rows"]:
+        s = f"{r['name']:<28}"
+        for c in carriers:
+            v = r.get(c, {})
+            s += f"{('±%.1f%%' % (100 * v['half'])) if 'half' in v else ('×%.2f' % v['ratio']) if 'ratio' in v else '—':>16}"
+        L.append(s)
+    return "\n".join(L)
 
 
 def al_report(rows):

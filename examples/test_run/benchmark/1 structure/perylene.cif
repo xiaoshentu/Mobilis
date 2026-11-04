@@ -1,0 +1,98 @@
+####################################################################### 
+# 
+# This file contains crystal structure data downloaded from the 
+# Cambridge Structural Database (CSD) hosted by the Cambridge 
+# Crystallographic Data Centre (CCDC).
+# 
+# Full information about CCDC data access policies and citation 
+# guidelines are available at http://www.ccdc.cam.ac.uk/access/V1 
+# 
+# Audit and citation data items may have been added by the CCDC. 
+# Please retain this information to preserve the provenance of 
+# this file and to allow appropriate attribution of the data. 
+# 
+#######################################################################
+
+data_PERLEN01
+#This CIF has been generated from an entry in the Cambridge Structural Database
+_database_code_depnum_ccdc_archive 'CCDC 1231185'
+_database_code_CSD               PERLEN01
+loop_
+_citation_id
+_citation_doi
+_citation_year
+1 10.1098/rspa.1964.0094 1964
+_audit_creation_method           'Created from the CSD'
+_audit_update_record             
+;
+2026-10-27 downloaded from the CCDC.
+;
+_database_code_NBS               521575
+_chemical_formula_moiety         'C20 H12'
+_chemical_name_systematic        Perylene
+_chemical_absolute_configuration unk
+_diffrn_ambient_temperature      295
+_exptl_crystal_density_diffrn    1.361
+#These two values have been output from a single CSD field.
+_refine_ls_R_factor_gt           0.081
+_refine_ls_wR_factor_gt          0.081
+_diffrn_radiation_probe          x-ray
+_symmetry_cell_setting           monoclinic
+_symmetry_space_group_name_H-M   'P 21/a'
+_symmetry_Int_Tables_number      14
+_space_group_name_Hall           '-P 2yab'
+loop_
+_symmetry_equiv_pos_site_id
+_symmetry_equiv_pos_as_xyz
+1 x,y,z
+2 1/2-x,1/2+y,-z
+3 -x,-y,-z
+4 1/2+x,1/2-y,z
+_cell_length_a                   11.277
+_cell_length_b                   10.826
+_cell_length_c                   10.263
+_cell_angle_alpha                90
+_cell_angle_beta                 100.55
+_cell_angle_gamma                90
+_cell_volume                     1231.78
+_cell_formula_units_Z            4
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+C1 C 0.26240 -0.04740 0.38160
+C2 C 0.18570 -0.04660 0.10500
+C3 C -0.05170 -0.23870 -0.29590
+C4 C -0.09230 -0.32740 -0.21980
+C5 C -0.05470 -0.32850 -0.07980
+C6 C 0.02600 -0.32320 0.20570
+C7 C 0.06640 -0.32170 0.34500
+C8 C 0.14510 -0.23190 0.40210
+C9 C 0.18410 -0.14190 0.32390
+C10 C 0.14520 -0.14040 0.18420
+C11 C 0.06520 -0.23530 0.12510
+C12 C 0.30050 0.04320 0.30700
+C13 C 0.02540 -0.23660 -0.02040
+C14 C 0.26360 0.04470 0.16830
+C15 C 0.17960 0.04280 -0.11850
+C16 C 0.14170 0.03860 -0.25820
+C17 C 0.06680 -0.05300 -0.31750
+C18 C 0.02660 -0.14560 -0.23980
+C19 C 0.06510 -0.14520 -0.09960
+C20 C 0.14460 -0.04930 -0.03860
+H1 H 0.29000 -0.04600 0.49300
+H2 H -0.07800 -0.23600 -0.40200
+H3 H -0.15300 -0.40000 -0.26600
+H4 H -0.08600 -0.40000 -0.01600
+H5 H -0.03700 -0.39300 0.16100
+H6 H 0.03300 -0.39900 0.41200
+H7 H 0.17900 -0.23200 0.51200
+H8 H 0.35800 0.11400 0.36700
+H9 H 0.29700 0.12000 0.10800
+H10 H 0.24300 0.11400 -0.07000
+H11 H 0.17300 0.11100 -0.32500
+H12 H 0.03800 -0.06300 -0.42300
+
+#END

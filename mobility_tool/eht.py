@@ -288,7 +288,7 @@ def _coupling_block(A, B, **kw):
 
 
 def eht_transfer_integrals(atoms_a, atoms_b, charge_a=0, charge_b=0, orbitals=("HOMO", "LUMO"), esd=True,
-                           _mono_b=None, _mono_a=None, **kw):
+                           _mono_b=None, _mono_a=None, pi=False, **kw):
     """atoms: [(元素, x, y, z)] (Å)。返回 J_eff、J、S、位点能 (meV/eV)，esd=True 时另给能级分裂结果。
     与 eht_transfer_integrals_full 数值一致，但单体结果被缓存，且只计算分子间的重叠块。"""
     import re
@@ -305,13 +305,30 @@ def eht_transfer_integrals(atoms_a, atoms_b, charge_a=0, charge_b=0, orbitals=("
         sh = int(m.group(2) or 0)
         ia = (A["nocc"] - 1 if m.group(1) == "HOMO" else A["nocc"]) + sh
         ib = (B["nocc"] - 1 if m.group(1) == "HOMO" else B["nocc"]) + sh
+        if pi:                                       # HOMO/LUMO 改为最高占据 / 最低空的 π 轨道
+            pa = pi_frontier(A, sa, xa)
+            pb = pi_frontier(B, sb, xb)
+            k = 0 if m.group(1) == "HOMO" else 1
+            ia += (pa[0] - (A["nocc"] - 1)) if k == 0 else (pa[1] - A["nocc"])
+            ib += (pb[0] - (B["nocc"] - 1)) if k == 0 else (pb[1] - B["nocc"])
+            shift = (pa[2]["HOMO_shift"], pa[2]["LUMO_shift"])
+            if shift != (0, 0) and not any("π" in w for w in warn):
+                warn.append(f"π 轨道识别：空穴用 HOMO{shift[0]:+d}，电子用 LUMO{shift[1]:+d} "
+                            f"(HOMO/LUMO 本身的 π 成分 {pa[2]['pi_HOMO']:.2f}/{pa[2]['pi_LUMO']:.2f})")
         ca, cb = A["C"][:, ia], B["C"][:, ib]
         j, s_ = float(ca @ hab @ cb), float(ca @ sab @ cb)
         ea, eb = float(A["e"][ia]), float(B["e"][ib])
         jeff = (j - 0.5 * (ea + eb) * s_) / (1 - s_ ** 2)
         res[lab.upper()] = {"J_eff_meV": jeff * 1000, "J_raw_meV": j * 1000, "S_AB": s_, "e_A_eV": ea, "e_B_eV": eb}
+    if not pi:
+        pa = pi_frontier(A, sa, xa)
+        if pa[2]["pi_HOMO"] < 0.5 or pa[2]["pi_LUMO"] < 0.5:
+            warn.append(f"HOMO/LUMO 的 π 成分为 {pa[2]['pi_HOMO']:.2f}/{pa[2]['pi_LUMO']:.2f} (可能是 N/O 孤对等 σ 轨道)；"
+                        f"最高占据 π 轨道为 HOMO{pa[2]['HOMO_shift']:+d}，最低空 π 轨道为 LUMO{pa[2]['LUMO_shift']:+d}，"
+                        "可用 --pi 改用 π 轨道，并与 DFT 的轨道次序核对")
     out = {"results": res, "warnings": warn, "nbf": A["nbf"] + B["nbf"],
-           "monomer_gap_eV": float(A["e"][A["nocc"]] - A["e"][A["nocc"] - 1])}
+           "monomer_gap_eV": float(A["e"][A["nocc"]] - A["e"][A["nocc"] - 1]),
+           "pi_frontier": pi_frontier(A, sa, xa)[2]}
     if esd:
         from scipy.linalg import eigh
         sA = overlap_matrix(A["shells"], A["nbf"])
@@ -323,6 +340,60 @@ def eht_transfer_integrals(atoms_a, atoms_b, charge_a=0, charge_b=0, orbitals=("
         res["ESD_hole_meV"] = (e[1] - e[0]) / 2 * 1000
         res["ESD_electron_meV"] = (e[3] - e[2]) / 2 * 1000
     return out
+
+
+
+# ----------------------------------------------------------------------------------------------
+# π 前线轨道自动识别
+# ----------------------------------------------------------------------------------------------
+def _local_normals(symbols, coords):
+    """每个重原子的局部 π 方向：该原子与成键重原子拟合平面的法向 (非平面分子也适用)；氢原子取 0。"""
+    x = np.asarray(coords, float)
+    heavy = np.array([s != "H" for s in symbols])
+    hx = x[heavy]
+    c0 = hx - hx.mean(0)
+    glob = np.linalg.svd(c0, full_matrices=False)[2][2] if len(hx) >= 3 else np.array([0.0, 0.0, 1.0])
+    N = np.zeros((len(x), 3))
+    for i in np.where(heavy)[0]:
+        d = np.linalg.norm(hx - x[i], axis=1)
+        nb = hx[(d > 0.1) & (d < 1.9)]
+        if len(nb) >= 2:
+            P = np.vstack([x[i], nb])
+            n = np.linalg.svd(P - P.mean(0), full_matrices=False)[2][2]
+        else:
+            n = glob
+        N[i] = n if n @ glob >= 0 else -n
+    return N
+
+
+def pi_character(mono, symbols, coords):
+    """各分子轨道的 π 成分：重原子 p 轨道沿局部法向的分量平方和 / 全部系数平方和 (0–1)。
+    平面共轭分子的 π 轨道接近 1，N/O 孤对 σ 轨道与 C–H、C–F σ 轨道接近 0。"""
+    N = _local_normals(symbols, coords)
+    C = np.asarray(mono["C"])
+    num = np.zeros(C.shape[1])
+    for sh in mono["shells"]:
+        if sh["l"] == 1:
+            o = sh["offset"]
+            num += (N[sh["atom"]] @ C[o:o + 3]) ** 2
+    return num / (C ** 2).sum(0)
+
+
+def pi_frontier(mono, symbols, coords, threshold=0.5, window=6):
+    """返回 (π-HOMO 序号, π-LUMO 序号, 说明)。只在 HOMO 以下 / LUMO 以上 window 个轨道内寻找。"""
+    key = "_pi_frontier"
+    if key in mono:
+        return mono[key]
+    f = pi_character(mono, symbols, coords)
+    n = mono["nocc"]
+    occ = [i for i in range(n - 1, max(n - 1 - window, -1), -1) if f[i] >= threshold]
+    vir = [i for i in range(n, min(n + window, len(f))) if f[i] >= threshold]
+    ih = occ[0] if occ else n - 1
+    il = vir[0] if vir else n
+    note = {"HOMO_shift": ih - (n - 1), "LUMO_shift": il - n, "pi_HOMO": float(f[n - 1]), "pi_LUMO": float(f[n]),
+            "pi_selected_h": float(f[ih]), "pi_selected_e": float(f[il]), "found": bool(occ and vir)}
+    mono[key] = (ih, il, note)
+    return mono[key]
 
 
 def clear_cache():

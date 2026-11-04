@@ -1,0 +1,50 @@
+{
+  "name": "anthracene",
+  "level": "B3LYP/6-31G(d)",
+  "sp_level": "B3LYP/6-31G(d)",
+  "separate_sp": false,
+  "charge": 0,
+  "files": {
+    "anthracene_neutral": [
+      {
+        "state": "neutral",
+        "geom": "neutral",
+        "role": "opt"
+      },
+      {
+        "state": "cation",
+        "geom": "neutral",
+        "role": "sp"
+      },
+      {
+        "state": "anion",
+        "geom": "neutral",
+        "role": "sp"
+      }
+    ],
+    "anthracene_cation": [
+      {
+        "state": "cation",
+        "geom": "cation",
+        "role": "opt"
+      },
+      {
+        "state": "neutral",
+        "geom": "cation",
+        "role": "sp"
+      }
+    ],
+    "anthracene_anion": [
+      {
+        "state": "anion",
+        "geom": "anion",
+        "role": "opt"
+      },
+      {
+        "state": "neutral",
+        "geom": "anion",
+        "role": "sp"
+      }
+    ]
+  }
+}

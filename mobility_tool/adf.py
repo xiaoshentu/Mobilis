@@ -97,7 +97,7 @@ def generate_adf_inputs(outdir, dimer=None, n_a=None, mono_a=None, mono_b=None, 
         text += _dmpkf_lines("$AMSBIN", (outdir.resolve() / result_file).as_posix(), (outdir.resolve() / f"{full}.txt").as_posix()) + [""]
     else:
         ab = lambda f: (outdir.resolve() / f).as_posix()            # noqa: E731  绝对路径 (正斜杠)
-        common = ["Units", " length Angstrom", "End", "Symmetry NOSYM", "", "Basis", f" type {basis}", " core None",
+        common = ["Units", " length Angstrom", "End", "Symmetry NOSYM tol=0.1", "", "Basis", f" type {basis}", " core None",
                   " createoutput None", "End", "", _xc_block(functional, ""), "", "NOPRINT LOGFILE"]
         common += [line for line in extra.splitlines() if line.strip()]
         for stem, atoms_, lab in ((fa, atoms_a, "片段 1"), (fb, atoms_b, "片段 2")):
@@ -390,7 +390,7 @@ def generate_adf_batch(outdir, entries, functional="PW91", basis="TZP", style="c
     t21 = (lambda f: ab(f"{f}.t21")) if style == "classic" else (lambda f: ab(f"{f}.results/adf.rkf"))
 
     if style == "classic":
-        common = ["Units", " length Angstrom", "End", "Symmetry NOSYM", "", "Basis", f" type {basis}", " core None",
+        common = ["Units", " length Angstrom", "End", "Symmetry NOSYM tol=0.1", "", "Basis", f" type {basis}", " core None",
                   " createoutput None", "End", "", _xc_block(functional, ""), "", "NOPRINT LOGFILE"]
         common += [line for line in extra.splitlines() if line.strip()]
 

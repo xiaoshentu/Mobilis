@@ -2,7 +2,7 @@
 并按输运区间 (2J/λ、σ/kT、σ_J/J、Ioffe–Regel 极限) 给出各方法的适用性判断。
 
 方法
-  marcus_scalar   Marcus 速率 + 文献常用标量公式 D = (1/2n) Σ r² k P，P = k / Σk
+  marcus_scalar   Marcus 速率 + 文献常用的 Deng–Goddard 标量公式 D = (1/2n) Σ r² k P，P = k / Σk (偏小，供对比)
   marcus_tensor   Marcus 速率 + 无规行走严格张量 D_ab = ½ Σ k r_a r_b (位点等价)
   kmc_marcus      Marcus 速率的动力学蒙特卡洛 (零场扩散张量)
   kmc_marcus_dis  同上，加位点能高斯无序 σ (Boltzmann 平衡起点)
@@ -22,7 +22,7 @@ import numpy as np
 from .mobility import HBAR_EVS, KB_EV
 
 METHOD_NAMES = {
-    "marcus_scalar": "Marcus 标量公式 (文献常用)",
+    "marcus_scalar": "Marcus 标量公式 (Deng–Goddard 式，文献常用，供对比)",
     "marcus_tensor": "Marcus 无规行走张量 (解析)",
     "kmc_marcus": "Marcus KMC (零场扩散)",
     "kmc_marcus_dis": "Marcus KMC + 能量无序 σ",
