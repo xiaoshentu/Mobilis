@@ -1994,6 +1994,25 @@ class PhotoTab(ttk.Frame):
         self.tau = field(kf, 1, "寿命 τ / μs", 1.4)
         ttk.Button(k, text="计算 k_r, k_nr", command=S(self.rates)).pack(fill="x")
 
+        tv = ttk.LabelFrame(left, text="激发态速率 (TVCF：k_r, k_IC, k_ISC, k_RISC, TADF 动力学)")
+        tv.pack(fill="x", pady=4)
+        self.tv_s0 = FileEntry(tv, "S0 freq fchk", filetypes=[("fchk", "*.fchk *.fch"), ("All", "*.*")])
+        self.tv_s0.pack(fill="x")
+        self.tv_s1 = FileEntry(tv, "S1 freq fchk", filetypes=[("fchk", "*.fchk *.fch"), ("All", "*.*")])
+        self.tv_s1.pack(fill="x")
+        self.tv_t1 = FileEntry(tv, "T1 freq fchk", filetypes=[("fchk", "*.fchk *.fch"), ("All", "*.*")])
+        self.tv_t1.pack(fill="x")
+        self.tv_nac = FileEntry(tv, "S1–S0 非绝热耦合 (可选)")
+        self.tv_nac.pack(fill="x")
+        tf = ttk.Frame(tv)
+        tf.pack(fill="x")
+        self.tv_fosc = field(tf, 0, "振子强度 f (S1→S0)", 0.05)
+        self.tv_soc = field(tf, 1, "SOC S1–T1 / cm⁻¹", 0.5)
+        self.tv_soc0 = field(tf, 2, "SOC T1–S0 / cm⁻¹", 0.0)
+        self.tv_temp = field(tf, 3, "温度 / K", "300")
+        self.tv_es = field(tf, 4, "E(S1), E(T1) / eV (空=取自 fchk)", "")
+        ttk.Button(tv, text="计算 (TVCF)", style="Accent.TButton", command=S(self.tvcf_rates)).pack(fill="x")
+
         right = ttk.Frame(self, style="Bg.TFrame")
         right.pack(side="left", fill="both", expand=True, padx=(4, 10), pady=10)
         self.plot = PlotPanel(right, figsize=(6.5, 4.6))
@@ -2119,6 +2138,43 @@ class PhotoTab(ttk.Frame):
         if not pairs:
             raise ValueError("结果中缺少几何结构")
         self._overlay(pairs)
+
+    def tvcf_rates(self):
+        from .tvcf import Emitter
+        es = [float(x) for x in self.tv_es.get().replace(",", " ").split()]
+        args = dict(s0=self.tv_s0.get(), s1=self.tv_s1.get(), t1=self.tv_t1.get(), soc=float(self.tv_soc.get()),
+                    fosc=float(self.tv_fosc.get()), soc_t1s0=float(self.tv_soc0.get() or 0),
+                    nac=self.tv_nac.get() or None, e_s1=es[0] if len(es) == 2 else None,
+                    e_t1=es[1] if len(es) == 2 else None)
+        temps = [float(x) for x in self.tv_temp.get().replace(",", " ").split()]
+
+        def work():
+            em = Emitter(**args)
+            return em, [em.rates(T) for T in temps]
+
+        def done(res):
+            em, rows = res
+            sm = em.summary()
+            t = self.text
+            t.delete("1.0", "end")
+            t.insert("end", f"S1 = {sm['E_S1_eV']:.3f} eV, T1 = {sm['E_T1_eV']:.3f} eV, ΔE_ST = "
+                            f"{1000 * sm['dE_ST_eV']:.0f} meV; λ(S1→S0) = {1000 * sm['lambda_S1S0_eV']:.0f} meV\n")
+            for w in em.warnings:
+                t.insert("end", T("[警告] ") + w + "\n")
+            for r in rows:
+                t.insert("end", f"T = {r['T']:.0f} K: k_r = {r['k_r_S1']:.2e}, k_IC = {r['k_IC_S1']:.2e}, "
+                                f"k_ISC = {r['k_ISC']:.2e}, k_RISC = {r['k_RISC']:.2e}, k_nr(T1) = {r['k_nr_T1']:.2e} s⁻¹\n"
+                                f"        τ_prompt = {r['tau_prompt_s'] * 1e9:.3g} ns, τ_delayed = "
+                                f"{r['tau_delayed_s'] * 1e6:.3g} μs, PLQY = {r['PLQY_total']:.3f}\n")
+            ax = self.plot.new_axes()
+            for r in rows:
+                if r.get("E_eV") is not None:
+                    ax.plot(1239.841984 / r["E_eV"], r["spectrum"], label=f"S1 → S0, {r['T']:.0f} K")
+            ax.set_xlabel(T("波长 / nm"))
+            ax.set_ylabel(T("归一化强度"))
+            ax.legend(frameon=False)
+            self.plot.draw()
+        self.app.run_bg("TVCF 激发态速率", work, done)
 
     def rates(self):
         k = decay_rates(float(self.plqy.get()), float(self.tau.get()))
@@ -3760,6 +3816,10 @@ class CompareTab(ttk.Frame):
         self.lam_s = field(m, 1, "经典部分占 λ 的比例 λ_s/λ", 0.3, width=10)
         ttk.Button(m, text="由重组能分解估计 ħω 与 λ_s", command=S(self.mlj_from_decomp)).grid(
             row=2, column=0, columnspan=4, sticky="ew")
+        self.use_fgr = tk.BooleanVar(value=False)
+        ttk.Checkbutton(m, text="加入量子核隧穿 (费米黄金规则，分解页的全部模式)", variable=self.use_fgr).grid(
+            row=3, column=0, columnspan=4, sticky="w")
+        self.fgr_car = field(m, 4, "分解页的模式属于", "空穴", values=["空穴", "电子"], width=8)
 
         k = ttk.LabelFrame(left, text="KMC")
         k.pack(fill="x", pady=3)
@@ -3812,6 +3872,18 @@ class CompareTab(ttk.Frame):
         self.hw.set(f"{hw * 1000:.0f}")
         self.lam_s.set(f"{flow:.2f}")
         self.app.log(f"MLJ 参数由分解得到：ħω_eff = {hw * 1000:.0f} meV，低频 (< 1000 cm⁻¹) 部分占 λ 的 {flow:.0%}")
+
+    def _fgr(self, T):
+        """FGRRate from the modes of the decomposition page (neutral and ion sets), or None."""
+        if not self.use_fgr.get():
+            return None
+        from .tunneling import FGRRate
+        sets = getattr(self.app.decomp_tab, "sets", None) or {}
+        modes = [(float(m["freq_cm-1"]), float(m["S"])) for s in sets.values() if s and s.get("modes")
+                 for m in s["modes"] if float(m["freq_cm-1"]) > 0 and float(m.get("S") or 0) > 0]
+        if not modes:
+            raise ValueError("量子核隧穿需要重组能分解：请先在“分解/黄昆因子”页完成分解")
+        return FGRRate(modes, T)
 
     def _ceds_source(self, T):
         sc = self.app.scan_tab
@@ -3882,6 +3954,8 @@ class CompareTab(ttk.Frame):
             raise ValueError("请至少选择一种方法")
         walkers, steps = (int(x) for x in self.walk.get().split())
         jobs = {}
+        fgr = self._fgr(T)
+        fgr_car = "hole" if self.fgr_car.get() in ("空穴", "hole", "Holes") else "electron"
         for car in ("hole", "electron"):
             lam = self._lam(car)
             g, sig, lat = self._inputs(car, T)
@@ -3895,6 +3969,9 @@ class CompareTab(ttk.Frame):
                              walkers=walkers, steps=steps, lattice=lat,
                              extra=self._ceds_extra(car, T) if self.with_ceds.get() else (),
                              polar=self._polar(car, g))
+            if fgr is not None and car == fgr_car:
+                from .compare import FGR_METHODS
+                jobs[car].update(methods=methods + FGR_METHODS, fgr=fgr)
 
         def work():
             return {car: compare_methods(**kw) for car, kw in jobs.items()}
@@ -4152,6 +4229,215 @@ class PolarTab(ttk.Frame):
         if not p:
             return None
         export_csv(self.res, p, self.md, self.levels)
+        self.plot.fig.savefig(str(Path(p).with_suffix(".png")), dpi=300)
+        self.app.log(f"已导出 {p} 与 {Path(p).with_suffix('.png').name} (300 dpi)")
+        return p
+
+
+class PhotoCondTab(ttk.Frame):
+    """光电导：激光照射下的光生载流子浓度、产率与光电导 (photocond.py)。"""
+
+    def __init__(self, parent, app):
+        super().__init__(parent, style="Bg.TFrame")
+        self.app = app
+        self.rows, self.par = None, None
+        S = safe(app)
+        panel = SectionPanel(self, width=470)
+        panel.pack(side="left", fill="y", padx=(10, 6), pady=10)
+        left = panel.inner
+
+        t = ttk.LabelFrame(left, text="迁移率与介电常数")
+        t.pack(fill="x")
+        self.md_csv = FileEntry(t, "ceds md 结果", filetypes=[("CSV", "*.csv")], width=26)
+        self.md_csv.pack(fill="x")
+        g = ttk.Frame(t)
+        g.pack(fill="x")
+        self.mu_e = field(g, 0, "电子迁移率 / cm² V⁻¹ s⁻¹", "", width=10)
+        self.mu_h = field(g, 1, "空穴迁移率 / cm² V⁻¹ s⁻¹", "", width=10)
+        self.eps = field(g, 2, "相对介电常数 ε_r", 3.5, width=10)
+        b = ttk.Frame(t)
+        b.pack(fill="x")
+        ttk.Button(b, text="从 ceds md 结果读取 μ (按温度)", command=S(self.mu_from_csv)).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(b, text="取极化位点能页的 ε", command=S(self.eps_from_polar)).pack(side="left", fill="x", expand=True)
+
+        x = ttk.LabelFrame(left, text="激子")
+        x.pack(fill="x", pady=3)
+        self.eb = field(x, 0, "激子结合能 E_b / eV", 0.5, width=10)
+        self.et = field(x, 1, "或：输运能隙 E_t / eV (带边)", "", width=10)
+        self.eopt = field(x, 2, "　　光学能隙 E_opt / eV", "", width=10)
+        self.tau_s = field(x, 3, "单重态激子寿命 τ_S / ps", 1000, width=10)
+        ttk.Label(x, text="E_b 为空时取 E_t − E_opt。τ_S 包括辐射、非辐射衰减与单重态裂分 (并五苯约 0.08 ps)",
+                  foreground=PALETTE["muted"], wraplength=440).grid(row=4, column=0, columnspan=4, sticky="w")
+
+        s = ttk.LabelFrame(left, text="样品与光照")
+        s.pack(fill="x", pady=3)
+        self.wl = field(s, 0, "激光波长 / nm", 532, width=10)
+        self.alpha = field(s, 1, "吸收系数 α / cm⁻¹", "1e5", width=10)
+        self.thick = field(s, 2, "膜厚 / nm", 100, width=10)
+        self.refl = field(s, 3, "反射率 R", 0.1, width=10)
+        self.inten = field(s, 4, "光强 / W cm⁻² (可多个)", "1e-3 1e-2 0.1 1", width=16)
+        self.field_ = field(s, 5, "电场 / V cm⁻¹ (可多个)", "1e5", width=16)
+        self.temp = field(s, 6, "温度 / K", 300, width=10)
+        self.fluence = field(s, 7, "脉冲能量密度 / μJ cm⁻² (可选)", "", width=10)
+
+        r = ttk.LabelFrame(left, text="复合")
+        r.pack(fill="x", pady=3)
+        self.zeta = field(r, 0, "Langevin 缩减因子 ζ", 1, width=10)
+        self.tau_t = field(r, 1, "陷阱复合寿命 τ_t / ns (空 = 无)", "", width=10)
+
+        bb = ttk.Frame(left)
+        bb.pack(fill="x", pady=4)
+        ttk.Button(bb, text="计算光电导", style="Accent.TButton", command=S(self.run)).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(bb, text="导出 CSV 与图…", command=S(self.export)).pack(side="left", fill="x", expand=True)
+        ttk.Label(left, text="g = Φ(1−R)(1−e^(−αd))/d；η = k_d/(k_d + 1/τ_S)，k_d 为 Onsager–Braun 解离速率；"
+                             "ηg = k_r n² + n/τ_t，k_r = ζ e(μe+μh)/(ε₀ε_r)；Δσ = e n (μe+μh)。"
+                             "迁移率取基态 (极化子) 迁移率：光生载流子在皮秒内弛豫。",
+                  foreground=PALETTE["muted"], wraplength=440, justify="left").pack(anchor="w")
+
+        right = ttk.Frame(self, style="Bg.TFrame")
+        right.pack(side="left", fill="both", expand=True, padx=(4, 10), pady=10)
+        self.plot = PlotPanel(right, figsize=(7.0, 4.4))
+        self.plot.pack(fill="both", expand=True)
+        self.text = styled_text(right, app.mono, height=14, wrap="none", size=9)
+        self.text.pack(fill="x", pady=(8, 0))
+
+    @staticmethod
+    def _nums(s):
+        return [float(v) for v in str(s).replace(",", " ").split()]
+
+    def mu_from_csv(self):
+        from .cli import _mu_from_md_csv
+        p = self.md_csv.get()
+        if not p:
+            raise ValueError("请先选择 ceds md 的结果 csv")
+        mu_e, mu_h, Tm = _mu_from_md_csv(p, float(self.temp.get()))
+        self.mu_e.set(f"{mu_e:.4g}")
+        self.mu_h.set(f"{mu_h:.4g}")
+        self.app.log(f"ceds md 结果：T = {Tm:g} K 的迁移率 μe = {mu_e:.3g}，μh = {mu_h:.3g} cm² V⁻¹ s⁻¹")
+
+    def eps_from_polar(self):
+        res = self.app.pol_tab.res
+        if not res or not res.get("eps_LL"):
+            raise ValueError("请先在“极化位点能”页计算晶体极化能")
+        self.eps.set(f"{res['eps_LL']:.3g}")
+        self.app.log(f"ε_r = {res['eps_LL']:.3g} (Lorentz–Lorenz，极化位点能页)")
+
+    def _params(self):
+        if not self.mu_e.get().strip() or not self.mu_h.get().strip():
+            if self.md_csv.get():
+                self.mu_from_csv()
+            else:
+                raise ValueError("请填写电子与空穴迁移率，或选择 ceds md 结果")
+        if self.eb.get().strip():
+            eb = float(self.eb.get())
+        elif self.et.get().strip() and self.eopt.get().strip():
+            eb = float(self.et.get()) - float(self.eopt.get())
+        else:
+            raise ValueError("请填写激子结合能，或输运能隙与光学能隙")
+        if eb <= 0:
+            raise ValueError(f"激子结合能 {eb:.3f} eV 必须为正")
+        tt = self.tau_t.get().strip()
+        return dict(wavelength=float(self.wl.get()), alpha=float(self.alpha.get()), thickness=float(self.thick.get()),
+                    refl=float(self.refl.get()), T=float(self.temp.get()), mu_e=float(self.mu_e.get()),
+                    mu_h=float(self.mu_h.get()), eps_r=float(self.eps.get()), eb=eb,
+                    tau_s=float(self.tau_s.get()) * 1e-12, zeta=float(self.zeta.get()),
+                    tau_t=float(tt) * 1e-9 if tt else None)
+
+    def run(self):
+        from . import photocond as PC
+        par = self._params()
+        I, F = sorted(self._nums(self.inten.get())), self._nums(self.field_.get())
+        if not I or not F:
+            raise ValueError("请填写光强与电场")
+        rows = []
+        for f in F:
+            for i in I:
+                r = PC.steady_state(intensity=i, field=f, **par)
+                rows.append({"intensity_Wcm2": i, "field_Vcm": f, "T_K": par["T"], "eta": float(r["eta"]),
+                             "G_cm3s": float(r["G"]) * 1e-6, "n_cm3": float(r["n"]) * 1e-6,
+                             "lifetime_s": float(r["lifetime"]), "dsigma_Scm": float(r["dsigma"]) / 100,
+                             "J_Acm2": float(r["J"]) * 1e-4, "exponent_k": ""})
+            rr = [x for x in rows if x["field_Vcm"] == f]
+            for j in range(1, len(rr)):
+                rr[j]["exponent_k"] = float(np.log(rr[j]["dsigma_Scm"] / rr[j - 1]["dsigma_Scm"]) /
+                                            np.log(rr[j]["intensity_Wcm2"] / rr[j - 1]["intensity_Wcm2"]))
+        self.rows, self.par = rows, par
+        a_nm = PC.capture_radius(par["eb"], par["eps_r"]) * 1e9
+        kl = PC.langevin(par["mu_e"], par["mu_h"], par["eps_r"]) * 1e6
+        L = [f"E_b = {par['eb']:.3f} eV   ε_r = {par['eps_r']:g}   电子–空穴距离 a = {a_nm:.2f} nm   "
+             f"k_L = {kl:.3g} cm³ s⁻¹   吸收比例 {PC.absorbed_fraction(par['alpha'], par['thickness'], par['refl']):.3f}"]
+        if a_nm < 0.4:
+            L.append("[注意] a < 0.4 nm：E_b 大于近邻分子上电子–空穴对的库仑能，请检查 E_t 与 E_opt (应取带边能隙)")
+        L.append(f"{'光强 W/cm²':>11s} {'电场 V/cm':>10s} {'η':>9s} {'G /cm³s':>9s} {'n /cm³':>9s} {'寿命 /s':>9s} "
+                 f"{'Δσ S/cm':>9s} {'J A/cm²':>9s} {'k':>5s}")
+        for x in rows:
+            k = f"{x['exponent_k']:.2f}" if x["exponent_k"] != "" else ""
+            L.append(f"{x['intensity_Wcm2']:11.3g} {x['field_Vcm']:10.3g} {x['eta']:9.3g} {x['G_cm3s']:9.3g} "
+                     f"{x['n_cm3']:9.3g} {x['lifetime_s']:9.3g} {x['dsigma_Scm']:9.3g} {x['J_Acm2']:9.3g} {k:>5s}")
+        L.append("k：Δσ ∝ I^k 的局部指数 (0.5 = Langevin 双分子复合，1 = 单分子 / 陷阱复合)")
+        self.pulse = None
+        if self.fluence.get().strip():
+            t = np.logspace(-12, -3, 200)
+            ds, n0 = PC.pulse_decay(t, fluence=float(self.fluence.get()) * 1e-6, field=F[0], **par)
+            self.pulse = (t, ds / 100, n0 * 1e-6)
+            L.append(f"脉冲 {float(self.fluence.get()):g} μJ cm⁻²：n₀ = {n0 * 1e-6:.3g} cm⁻³，"
+                     f"Δσ(0) = {ds[0] / 100:.3g} S cm⁻¹")
+        self.text.delete("1.0", "end")
+        self.text.insert("end", "\n".join(L) + "\n")
+        self._draw(I, F)
+        self.app.log("光电导计算完成")
+
+    def _draw(self, I, F):
+        from . import photocond as PC
+        par = self.par
+        fig = self.plot.fig
+        fig.clf()
+        n = 3 if self.pulse else 2
+        ax = fig.add_subplot(1, n, 1)
+        Ig = np.logspace(np.log10(min(I)) - 1, np.log10(max(I)) + 1, 80)
+        for f in F:
+            d = PC.steady_state(intensity=Ig, field=f, **par)["dsigma"] / 100
+            ax.loglog(Ig, d, lw=1.4, label=f"F = {f:g} V/cm")
+            pts = [x for x in self.rows if x["field_Vcm"] == f]
+            ax.loglog([x["intensity_Wcm2"] for x in pts], [x["dsigma_Scm"] for x in pts], "o", ms=4, color="k")
+        ax.set_xlabel("光强 / W cm⁻²")
+        ax.set_ylabel("Δσ / S cm⁻¹")
+        ax.set_title("光电导与光强")
+        ax.legend(fontsize=7, frameon=False)
+        ax = fig.add_subplot(1, n, 2)
+        Fg = np.logspace(3, 6.5, 120)
+        eta, _ = PC.yield_free(Fg, par["T"], par["eb"], par["eps_r"], par["mu_e"], par["mu_h"], par["tau_s"])
+        ax.loglog(Fg, eta, lw=1.4, color="#c0472f")
+        for f in F:
+            e_, _ = PC.yield_free(f, par["T"], par["eb"], par["eps_r"], par["mu_e"], par["mu_h"], par["tau_s"])
+            ax.loglog([f], [float(e_)], "o", ms=4, color="k")
+        ax.set_xlabel("电场 / V cm⁻¹")
+        ax.set_ylabel("自由载流子产率 η")
+        ax.set_title("激子解离 (Onsager–Braun)")
+        if self.pulse:
+            t, ds, n0 = self.pulse
+            ax = fig.add_subplot(1, n, 3)
+            ax.loglog(t, ds, lw=1.4, color="#2f6db5")
+            ax.set_xlabel("脉冲后时间 / s")
+            ax.set_ylabel("Δσ / S cm⁻¹")
+            ax.set_title("脉冲后的衰减")
+        self.plot.draw()
+
+    def export(self, path=None):
+        from .photocond import export_csv
+        if not self.rows:
+            raise ValueError("请先计算光电导")
+        p = path or filedialog.asksaveasfilename(defaultextension=".csv", initialfile="photocond.csv",
+                                                 filetypes=[("CSV", "*.csv")])
+        if not p:
+            return None
+        export_csv(self.rows, p)
+        if self.pulse:
+            t, ds, _ = self.pulse
+            export_csv([{"t_s": float(a), "dsigma_Scm": float(b)} for a, b in zip(t, ds)],
+                       str(Path(p).with_name(Path(p).stem + "_pulse.csv")))
         self.plot.fig.savefig(str(Path(p).with_suffix(".png")), dpi=300)
         self.app.log(f"已导出 {p} 与 {Path(p).with_suffix('.png').name} (300 dpi)")
         return p
@@ -7411,11 +7697,11 @@ def section_panel(tab):
 class App(tk.Tk):
     STEPS = ["结构/晶体", "重组能", "IP/EA", "分解/黄昆因子", "激发态/光谱", "转移积分", "迁移率", "输运理论与光物理扩展",
              "分子间相互作用能", "耦合代理模型与堆积设计", "波函数分析", "批量扫描工作流", "极化位点能", "无定形形貌 (MD)",
-             "迁移率方法对比"]
+             "光电导", "迁移率方法对比"]
     NAV = [("结构", ["结构/晶体", "分子间相互作用能"]),
            ("单分子性质", ["重组能", "IP/EA", "分解/黄昆因子", "激发态/光谱", "波函数分析"]),
            ("电子耦合", ["转移积分", "批量扫描工作流", "耦合代理模型与堆积设计"]),
-           ("迁移率", ["迁移率", "极化位点能", "无定形形貌 (MD)", "输运理论与光物理扩展", "迁移率方法对比"])]
+           ("迁移率", ["迁移率", "极化位点能", "无定形形貌 (MD)", "输运理论与光物理扩展", "光电导", "迁移率方法对比"])]
     PAGE_INFO = {
         "结构/晶体": "打开分子或晶体 (CIF)，搜索近邻二聚体，软件内 EHT 计算全部二聚体的转移积分，原子 / 基团取代",
         "分子间相互作用能": "二聚体结合能 (UFF / Gaussian 抵消校正)、能量框架与晶格能",
@@ -7431,6 +7717,7 @@ class App(tk.Tk):
         "输运理论与光物理扩展": "瞬态局域化理论、紧束缚能带与有效质量、动态无序、振动分辨光谱与 π 堆积几何",
         "极化位点能": "原子电荷 + Thole 诱导偶极：固态极化能 P±、固态 IE / EA、独立分子的位点能差与 MD 热涨落 σ_E",
         "无定形形貌 (MD)": "GROMACS 形貌 → 分子映射 → 近邻 → 转移积分 (EHT / Gaussian) → 位点能 → 周期盒子 KMC (同 VOTCA-CTP)",
+        "光电导": "激光照射下的光生载流子：激子产生、Onsager–Braun 解离产率、Langevin / 陷阱复合、稳态浓度与光电导、脉冲衰减",
         "迁移率方法对比": "同一套 J、λ、σ 输入下比较全部迁移率模型，并按输运区间判断各模型的适用性",
     }
 
@@ -7738,6 +8025,9 @@ class App(tk.Tk):
         fm.add_separator()
         cmd(fm, "设置工作目录…", self.set_workdir)
         fm.add_separator()
+        cmd(fm, "保存项目 (全部设置)…", self.save_project_file)
+        cmd(fm, "打开项目…", self.open_project_file)
+        fm.add_separator()
         cmd(fm, "退出", self.destroy)
         # 编辑
         em = menu("编辑")
@@ -7824,6 +8114,7 @@ class App(tk.Tk):
         cmd(mm_, "瞬态局域化 TLT / 能带 / 动态无序…", page("输运理论与光物理扩展"))
         cmd(mm_, "极化位点能 (P±、σ_E)…", page("极化位点能"))
         cmd(mm_, "无定形形貌 (GROMACS → KMC)…", page("无定形形貌 (MD)"))
+        cmd(mm_, "光电导 (激光照射下的光生载流子)…", page("光电导"))
         cmd(mm_, "迁移率方法对比…", page("迁移率方法对比"))
         mm_.add_separator()
         cmd(mm_, "相互作用能 (UFF) 与能量框架…", page("分子间相互作用能", "快速计算"))
@@ -7875,6 +8166,41 @@ class App(tk.Tk):
         if self._wins:
             menu.add_separator()
             menu.add_command(label=T("关闭全部功能窗口"), command=lambda: [w.withdraw() for w in self._wins.values()])
+
+    def save_project_file(self, path=None):
+        """保存当前结构与各功能页的全部设置到项目文件 (*.mobilis.json)；已有项目文件中的计算步骤保留。"""
+        from . import project as P
+        if path is None:
+            path = filedialog.asksaveasfilename(parent=self, title=T("保存项目"), defaultextension=".mobilis.json",
+                                                filetypes=[(T("Mobilis 项目"), "*.mobilis.json"), ("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            data = P.load(path)
+        except Exception:  # noqa: BLE001
+            data = {"name": Path(path).name.split(".")[0], "variables": {}, "steps": []}
+        data["gui"] = P.gui_collect(self)
+        if self.current_structure:
+            data["structure"] = str(self.current_structure)
+        P.save(path, data)
+        self.log(f"项目已保存: {path} ({len(data['gui'])} 项设置)")
+
+    def open_project_file(self, path=None):
+        from . import project as P
+        if path is None:
+            path = filedialog.askopenfilename(parent=self, title=T("打开项目"),
+                                              filetypes=[(T("Mobilis 项目"), "*.mobilis.json"), ("JSON", "*.json")])
+        if not path:
+            return
+        data = P.load(path)
+        st = data.get("structure")
+        if st and Path(st).exists():
+            self.struct_tab.open_path(st)
+        unknown = P.gui_apply(self, data.get("gui", {}))
+        self.log(f"项目已打开: {path} ({len(data.get('gui', {})) - len(unknown)} 项设置" +
+                 (f"，{len(unknown)} 项在本版本中不存在" if unknown else "") + ")")
+        if data.get("steps"):
+            self.log(f"项目含 {len(data['steps'])} 个计算步骤，可用 python -m mobility_tool project run {path} 运行")
 
     def set_workdir(self, d=None):
         """工作目录：所有文件选择框的下拉列表会列出其中 (及下一层子目录) 的匹配文件，浏览时也从这里开始。"""
@@ -7969,7 +8295,7 @@ App.TAB_CLASSES = {
     "输运理论与光物理扩展": ("adv_tab", AdvancedTab), "分子间相互作用能": ("inter_tab", InteractionTab),
     "耦合代理模型与堆积设计": ("sur_tab", SurrogateTab), "波函数分析": ("wfn_tab", WavefunctionTab),
     "批量扫描工作流": ("scan_tab", ScanTab), "极化位点能": ("pol_tab", PolarTab), "无定形形貌 (MD)": ("morph_tab", MorphTab),
-    "迁移率方法对比": ("cmp_tab", CompareTab)}
+    "光电导": ("pc_tab", PhotoCondTab), "迁移率方法对比": ("cmp_tab", CompareTab)}
 for _name, (_attr, _cls) in App.TAB_CLASSES.items():          # app.reorg_tab 等：首次访问时创建对应的功能窗口
     setattr(App, _attr, property(lambda self, n=_name: self._get_tab(n)))
 

@@ -206,9 +206,16 @@ def monomer_report(symbols, Y):
 # ----------------------------------------------------------------------------------------------
 # ADF 输入与批处理 (ADF2016 / ADF2019 以前的 classic 格式，与 make_dimers.py 相同)
 # ----------------------------------------------------------------------------------------------
+# 片段映射容差：ADF 用数值方式求主片段到每个片段的转动，长分子 (如 C8-BTBT，约 27 Å) 的末端误差可超过
+# 默认 1e-3 而报 "NO TRANSFORMATION FOUND"，尽管几何是精确的刚体像 (C8-BTBT 中见到 0.0045–0.028)。
+# 取 ADF 建议的 0.1：容差只决定是否接受找到的原子对应；对应关系仍按原子顺序，只要单体没有与恒等映射相差
+# 小于 0.1 Å 的其它纯转动对称像 (C8-BTBT 只有中心反演，最近的纯转动像相差 2.2 Å)，就不会映射错。
+ADF_SYM_TOL = 0.1
+
+
 def keyword_block(xc, basis, d3=False):
     disp = "\nDispersion Grimme3 BJDAMP" if d3 else ""
-    return (f"SYMMETRY NOSYM\n\nBASIS\ntype {basis}\ncore None\ncreateoutput None\nEND\n\n"
+    return (f"SYMMETRY NOSYM tol={ADF_SYM_TOL}\n\nBASIS\ntype {basis}\ncore None\ncreateoutput None\nEND\n\n"
             f"XC\n{XC_LINES[xc]}{disp}\nEND\n\n")
 
 
@@ -290,6 +297,26 @@ def parse_adf_out(path):
 # ----------------------------------------------------------------------------------------------
 # 项目
 # ----------------------------------------------------------------------------------------------
+_QC_ENV_SH = ('ORCA_EXE="${ORCA_EXE:-orca}"  # full path of orca (needed for parallel runs), e.g. /opt/orca/orca\n'
+              'ORCA_2MKL="${ORCA_2MKL:-$(dirname "$ORCA_EXE")/orca_2mkl}"\n'
+              '[ -x "$ORCA_2MKL" ] || ORCA_2MKL=orca_2mkl\n'
+              'XTB_EXE="${XTB_EXE:-xtb}"\n')
+_QC_ENV_BAT = ("rem ==== set ORCA_EXE / XTB_EXE to the full paths if they are not on PATH ====\r\n"
+               "if not defined ORCA_EXE set ORCA_EXE=orca\r\nif not defined ORCA_2MKL set ORCA_2MKL=orca_2mkl\r\n"
+               "if not defined XTB_EXE set XTB_EXE=xtb")
+_MOLDEN_CACHE = {}
+
+
+def _molden_cached(path):
+    from .molden import read_molden
+    p = Path(path)
+    key = (str(p.resolve()), p.stat().st_mtime)
+    if key not in _MOLDEN_CACHE:
+        _MOLDEN_CACHE.clear()
+        _MOLDEN_CACHE[key] = read_molden(p)
+    return _MOLDEN_CACHE[key]
+
+
 class ScanProject:
     FILE = "project.json"
 
@@ -403,7 +430,137 @@ class ScanProject:
         return self.root / self.meta["levels"][level]["dir"]
 
     def t21(self, level, mirror=False):
+        """Reference monomer result of the level: ADF fragment file mono.t21 (mono_m.t21 for the mirror image), or the
+        Molden file mono.molden.input of an ORCA / xtb level (the phase reference of all dimers of the level)."""
+        if self.engine(level) != "adf":
+            return self.level_dir(level) / "mono.molden.input"
         return self.level_dir(level) / ("mono_m.t21" if mirror else "mono.t21")
+
+    def engine(self, level):
+        return self.meta["levels"].get(level, {}).get("engine", "adf")
+
+    # ---- ORCA / xtb levels (dimer projection on Molden files) ----
+    def add_qc_level(self, engine="orca", method="B3LYP D3BJ", basis="def2-SVP", gfn=1, nprocs=4, maxcore=2000):
+        """A level computed with ORCA (DFT, any method and basis ORCA knows) or xtb (GFN1/GFN2-xTB). Each dimer needs
+        a calculation of B and of AB; A is computed once (mono.molden.input) and is the phase reference."""
+        engine = engine.lower()
+        if engine not in ("orca", "xtb"):
+            raise ValueError("engine: orca or xtb")
+        if engine == "orca":
+            name = "ORCA_" + re.sub(r"[^A-Za-z0-9.+-]", "-", f"{method}_{basis}").strip("-")
+            lev = {"engine": "orca", "method": method, "basis": basis, "nprocs": int(nprocs), "maxcore": int(maxcore)}
+        else:
+            name = f"XTB_GFN{int(gfn)}"
+            lev = {"engine": "xtb", "method": f"GFN{int(gfn)}-xTB", "basis": "", "gfn": int(gfn)}
+        lev.update(dir=f"monomer/{name}", d3=False, xc=lev["method"])
+        self.meta["levels"][name] = lev
+        d = self.root / lev["dir"]
+        d.mkdir(parents=True, exist_ok=True)
+        sym = self.symbols
+        sh, bat = self._qc_commands(name, d, "mono", [(s, *p) for s, p in zip(sym, self.Y)])
+        (d / "run_mono.sh").write_bytes(("#!/bin/sh\n" + _QC_ENV_SH + "\n".join(sh) + "\n").encode("utf-8"))
+        (d / "run_mono.bat").write_bytes(("\r\n".join(["@echo off", "setlocal", _QC_ENV_BAT, *bat, "pause"]) + "\r\n")
+                                         .encode("ascii", errors="replace"))
+        self.save()
+        return name
+
+    def _qc_commands(self, level, d, stem, atoms):
+        """Input file(s) for one calculation in folder d and the shell / batch commands that turn it into
+        <stem>.molden.input in d."""
+        lev = self.meta["levels"][level]
+        d = Path(d)
+        d.mkdir(parents=True, exist_ok=True)
+        dp = d.resolve().as_posix()
+        dw = str(d.resolve())
+        if lev["engine"] == "orca":
+            body = [f"! {lev['method']} {lev['basis']} TightSCF NoAutoStart", f"%pal nprocs {lev['nprocs']} end",
+                    f"%maxcore {lev['maxcore']}", "%scf Sthresh 1e-8 end", "* xyz 0 1"]
+            body += [f"  {a[0]:2s} {a[1]:16.10f} {a[2]:16.10f} {a[3]:16.10f}" for a in atoms] + ["*", ""]
+            (d / f"{stem}.inp").write_text("\n".join(body))
+            sh = [f'cd "{dp}" && "$ORCA_EXE" {stem}.inp > {stem}.out 2>&1 && "$ORCA_2MKL" {stem} -molden > /dev/null']
+            bat = [f'cd /d "{dw}"', f'"%ORCA_EXE%" {stem}.inp > {stem}.out 2>&1',
+                   f'"%ORCA_2MKL%" {stem} -molden > nul']
+        else:
+            from .gaussian_io import write_xyz
+            sub = d / f"{stem}_xtb"
+            sub.mkdir(exist_ok=True)
+            write_xyz(sub / f"{stem}.xyz", atoms, f"{stem} for xtb")
+            sp = sub.resolve().as_posix()
+            sh = [f'cd "{sp}" && "$XTB_EXE" {stem}.xyz --gfn {lev["gfn"]} --molden > {stem}.out 2>&1 && '
+                  f'mv -f molden.input "{dp}/{stem}.molden.input"']
+            bat = [f'cd /d "{sub.resolve()}"', f'"%XTB_EXE%" {stem}.xyz --gfn {lev["gfn"]} --molden > {stem}.out 2>&1',
+                   f'move /y molden.input "{dw}\\{stem}.molden.input" > nul']
+        return sh, bat
+
+    def _write_qc_batches(self, name, comp, chunk):
+        d = self.scan_dir(name)
+        level = self.scan_info(name)["level"]
+        ref = self.t21(level).resolve()
+        root = d.resolve().as_posix()
+        names = []
+        for k in range(0, len(comp), chunk):
+            part = comp[k:k + chunk]
+            nb = f"batch_{name}_{k // chunk + 1}"
+            sh = ["#!/bin/sh", _QC_ENV_SH.rstrip("\n"),
+                  f"# Mobilis scan {name}, part {k // chunk + 1}/{(len(comp) - 1) // chunk + 1}, level {level}",
+                  f"# phase reference of all dimers: {ref.as_posix()}",
+                  f'if [ ! -s "{ref.as_posix()}" ]; then echo "ERROR: run {self.level_dir(level).as_posix()}/run_mono.sh '
+                  f'first"; exit 1; fi', ""]
+            bat = ["@echo off", "setlocal", _QC_ENV_BAT,
+                   f'if not exist "{ref}" (echo ERROR: run {self.level_dir(level)}\\run_mono.bat first & exit /b 1)']
+            for r in part:
+                A, B = self.dimer_atoms(r)
+                od = d / "outputs" / r["id"]
+                done = f"{root}/outputs/{r['id']}.done"
+                cb_sh, cb_bat = self._qc_commands(level, od, "B", B)
+                cd_sh, cd_bat = self._qc_commands(level, od, "AB", A + B)
+                sh += [f'if [ ! -f "{done}" ]; then', f'echo "running {r["id"]}"', *cb_sh, *cd_sh,
+                       f'if [ -s "{od.resolve().as_posix()}/B.molden.input" ] && '
+                       f'[ -s "{od.resolve().as_posix()}/AB.molden.input" ]; then echo ok > "{done}"; fi', "fi", ""]
+                dw = str((d / "outputs").resolve())
+                bat += [f'if not exist "{dw}\\{r["id"]}.done" (', f'echo running {r["id"]}', *cb_bat, *cd_bat,
+                        f'if exist "{od.resolve()}\\AB.molden.input" echo ok> "{dw}\\{r["id"]}.done"', ")"]
+            sh.append('echo "batch finished"')
+            text = "\n".join(sh) + "\n" + "".join(f"# 结果文件: outputs/{r['id']}.done\n" for r in part)
+            (d / f"{nb}.sh").write_bytes(text.encode("utf-8"))
+            (d / f"{nb}.bat").write_bytes(("\r\n".join(bat + ["echo batch finished"]) + "\r\n")
+                                          .encode("ascii", errors="replace"))
+            (d / f"{nb}.run").write_bytes(text.encode("utf-8"))       # same as .sh (the precheck looks for .run)
+            names.append(nb)
+        return names
+
+    def parse_qc(self, name, rid, write_cache=True):
+        """Coupling of one dimer of an ORCA / xtb scan from outputs/<rid>/B.molden.input, AB.molden.input and the
+        reference monomer; the same dict as parse_adf_out. A json cache next to the outputs avoids rereading."""
+        from .molden import frame_map, projection, read_molden
+        d = self.scan_dir(name)
+        od = d / "outputs" / rid
+        fb, fd = od / "B.molden.input", od / "AB.molden.input"
+        cache = d / "outputs" / f"{rid}.json"
+        if not (fb.exists() and fd.exists()):
+            return None
+        if cache.exists() and cache.stat().st_mtime >= max(fb.stat().st_mtime, fd.stat().st_mtime):
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except ValueError:
+                pass
+        level = self.scan_info(name)["level"]
+        try:
+            ref = _molden_cached(self.t21(level))
+            mb, md = read_molden(fb), read_molden(fd)
+            row = next(r for r in self.manifest(name) if r["id"] == rid)
+            T = frame_map(self.Y, self.B_coords(row))
+            res = projection(ref, mb, md, ref=ref, T=T)
+        except Exception as exc:  # noqa: BLE001 — a broken output counts as failed
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "carriers": {}, "eda": {}}
+        out = {"ok": True, "carriers": {}, "eda": {}}
+        for c, lab in (("hole", "HOMO"), ("electron", "LUMO")):
+            v = res[lab]
+            out["carriers"][c] = {"V": v["J_eff_meV"], "J": v["J_raw_meV"], "S": v["S_AB"], "e1": v["e_A_eV"],
+                                  "e2": v["e_B_eV"], "phase_B": v["phase_B"]}
+        if write_cache:
+            cache.write_text(json.dumps(out), encoding="utf-8")
+        return out
 
     def import_fragment(self, level, t21_path):
         """沿用已有的 mono.t21 (例如已有扫描所用的同一个文件)，保证与已有数据相位一致。"""
@@ -422,7 +579,17 @@ class ScanProject:
         return p if p.is_absolute() else self.root / p
 
     def scans(self):
-        return list(self.meta["scans"])
+        """Scans registered in project.json whose folder still exists (a deleted scan folder is skipped with a warning)."""
+        out, gone = [], []
+        for name in self.meta["scans"]:
+            (out if (self.scan_dir(name) / "scan.json").exists() else gone).append(name)
+        new = [g for g in gone if g not in getattr(self, "_warned", set())]
+        if new:
+            import sys
+            print(f"[warning] scan folder(s) missing, skipped: {', '.join(new)} "
+                  f"(remove them from {self.root / self.FILE} to silence this)", file=sys.stderr)
+            self._warned = getattr(self, "_warned", set()) | set(new)
+        return out
 
     def _new_scan_dir(self, name):
         if not re.fullmatch(r"[A-Za-z0-9_.\-]+", name):
@@ -483,7 +650,8 @@ class ScanProject:
         comp = [r for r in rows if r["status"] == "ok" and not r["rep"]]
         info = dict(info or {})
         lev = self.meta["levels"][level]
-        scan = {"name": name, "kind": kind, "level": level, "xc": lev["xc"], "basis": lev["basis"], "d3": lev["d3"],
+        scan = {"name": name, "kind": kind, "level": level, "xc": lev.get("xc", lev.get("method", "")),
+                "basis": lev.get("basis", ""), "d3": lev.get("d3", False), "engine": lev.get("engine", "adf"),
                 "created": time.strftime("%Y-%m-%d %H:%M"), "clash_min": clash_min, "chunk": chunk, "reduce": reduce,
                 "n_requested": len(configs), "n_computed": len(comp),
                 "n_clash": sum(1 for r in rows if r["status"] == "clash" and not r["rep"]),
@@ -521,6 +689,11 @@ class ScanProject:
         d = self.scan_dir(name)
         info = self.scan_info(name)
         level = info["level"]
+        if self.engine(level) != "adf":
+            for old in list(d.glob("batch_*.run")) + list(d.glob("batch_*.sh")) + list(d.glob("batch_*.bat")):
+                old.unlink()
+            comp = [r for r in self.manifest(name) if r["status"] == "ok" and not r["rep"]]
+            return self._write_qc_batches(name, comp, max(1, int(info.get("chunk") or len(comp) or 1)))
         t21 = self.t21(level).resolve().as_posix()
         t21m = self.t21(level, mirror=True).resolve().as_posix()
         lev = self.meta["levels"][level]
@@ -600,6 +773,8 @@ class ScanProject:
         info = self.scan_info(name)
         errors, warns = [], []
         level = info.get("level")
+        if level in self.meta["levels"] and self.engine(level) != "adf":
+            return self._precheck_qc(name, level, repair)
         if level in self.meta["levels"]:
             t21 = self.t21(level)
             if not t21.exists() or t21.stat().st_size == 0:
@@ -670,14 +845,48 @@ class ScanProject:
                 "n_failed": len(failed), "pending": pending, "batches": [b.name for b in batches],
                 "est_MB": est, "ok": not errors}
 
+    def _precheck_qc(self, name, level, repair=True):
+        d = self.scan_dir(name)
+        errors, warns = [], []
+        ref = self.t21(level)
+        if not ref.exists() or ref.stat().st_size == 0:
+            errors.append(f"missing reference monomer {ref}: run {self.level_dir(level) / 'run_mono.sh'} (or .bat) first")
+        batches = sorted(d.glob("batch_*.sh"))
+        if not batches:
+            errors.append("no batch files: regenerate them")
+        comp = [r for r in self.manifest(name) if r["status"] == "ok" and not r["rep"]]
+        done, pending, failed = [], [], []
+        for r in comp:
+            res = self.parse_qc(name, r["id"]) if ref.exists() else None
+            mark = d / "outputs" / f"{r['id']}.done"
+            if res and res.get("ok"):
+                done.append(r["id"])
+                if repair and not mark.exists():
+                    mark.write_text("ok\n")
+                continue
+            if res is not None:
+                failed.append(r["id"])
+            if repair and mark.exists():
+                mark.unlink()
+            pending.append(r["id"])
+        if failed:
+            warns.append(f"{len(failed)} dimers failed (see outputs/<id>/*.out) and will be rerun: {', '.join(failed[:8])}")
+        return {"errors": errors, "warnings": warns, "n_total": len(comp), "n_done": len(done),
+                "n_pending": len(pending), "n_failed": len(failed), "pending": pending,
+                "batches": [b.name for b in batches], "est_MB": None, "ok": not errors}
+
     # ---- 结果 ----
     def collect(self, name, write=True):
         """读取全部输出。按对称约简的对应关系展开到所有请求的构型；写 results.csv。"""
         d = self.scan_dir(name)
         rows = self.manifest(name)
         parsed, recs = {}, []
+        qc = self.engine(self.scan_info(name).get("level")) != "adf"
         for r in rows:
             if r["status"] == "ok" and not r["rep"]:
+                if qc:
+                    parsed[r["id"]] = self.parse_qc(name, r["id"])
+                    continue
                 out = self.output_path(name, r["id"])
                 parsed[r["id"]] = parse_adf_out(out) if out.exists() else None
         for r in rows:
@@ -699,7 +908,7 @@ class ScanProject:
                 rec["state"] = "done"
                 for c, v in res["carriers"].items():
                     rec[c] = v["V"]
-                    for k in ("J", "S", "e1", "e2", "V_adf", "V_recalc", "sign_mismatch"):
+                    for k in ("J", "S", "e1", "e2", "V_adf", "V_recalc", "sign_mismatch", "phase_B"):
                         if k in v:
                             rec[f"{k}_{c}"] = v[k]
                 for k, v in res["eda"].items():

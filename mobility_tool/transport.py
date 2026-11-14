@@ -10,6 +10,7 @@ TLT (Fratini, Ciuchi, Troisi 等；参考开源代码 TransLoc, github.com/CiuK1
 动态无序: 对二聚体中分子 B 作刚体热振动采样 (平移 σ_t, 转动 σ_r)，用软件内 EHT 计算 J 的分布。
 """
 import numpy as np
+from scipy import sparse as _sparse
 
 from .mobility import HBAR_EVS, KB_EV
 
@@ -87,12 +88,16 @@ def tlt_mobility(graph, T=300.0, carrier="hole", sigma=0.3, hbar_tau=0.005, size
         e, c = np.linalg.eigh(H)
         w = np.exp(-beta * (e - e.min()))
         w /= w.sum()
-        Ms = [c.T @ (H * D[:, :, a]) @ c for a in range(3)]           # ħv^a_nm (取实部, 乘 i 不影响模方)
+        # ħv^a_nm = cᵀ (H∘D_a) c (取实部, 乘 i 不影响模方)；H∘D_a 是稀疏的，D_a 恒为零的方向跳过
+        axes = [k for k in range(3) if np.any(D[:, :, k])]
+        Ms = {k: c.T @ np.asarray(_sparse.csr_matrix(H * D[:, :, k]) @ c) for k in axes}
         de = e[:, None] - e[None, :]
         kern = 2.0 / (hbar_tau ** 2 + de ** 2)
-        for a in range(3):
-            for b in range(a, 3):
-                val = float((w[:, None] * Ms[a] * Ms[b] * kern).sum())
+        wk = w[:, None] * kern
+        for i, a in enumerate(axes):
+            Wa = wk * Ms[a]
+            for b in axes[i:]:
+                val = float((Wa * Ms[b]).sum())
                 acc[a, b] += val
                 acc[b, a] = acc[a, b]
     L2 = acc / n_real                                                  # Å²

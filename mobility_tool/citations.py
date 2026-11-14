@@ -45,6 +45,17 @@ REFS = {
         "Baumeier, B.; Kirkpatrick, J.; Andrienko, D. Phys. Chem. Chem. Phys. 2010, 12, 11103–11113. "
         "(二聚体投影与简并能级)",
         "INDO/S 参数：MOPAC (openmopac.net，Apache-2.0)，Zerner 的 ZINDO/S 参数。"],
+    "量子核隧穿跳跃速率 (费米黄金规则，全部振动模式)": [
+        "Nan, G.; Yang, X.; Wang, L.; Shuai, Z.; Zhao, Y. Phys. Rev. B 2009, 79, 115203.",
+        "Shuai, Z.; Li, W.; Ren, J.; Jiang, Y.; Geng, H. J. Chem. Phys. 2020, 153, 080902."],
+    "热振动关联函数 (TVCF) 激发态速率": [
+        "Peng, Q.; Yi, Y.; Shuai, Z.; Shao, J. J. Chem. Phys. 2007, 126, 114302.",
+        "Niu, Y.; Peng, Q.; Deng, C.; Gao, X.; Shuai, Z. J. Phys. Chem. A 2010, 114, 7817–7831.",
+        "Peng, Q.; Niu, Y.; Shi, Q.; Gao, X.; Shuai, Z. J. Chem. Theory Comput. 2013, 9, 1132–1143."],
+    "形变势能带迁移率": [
+        "Bardeen, J.; Shockley, W. Phys. Rev. 1950, 80, 72–80.",
+        "Tang, L.; Long, M.; Wang, D.; Shuai, Z. Sci. China Ser. B 2009, 52, 1646–1652.",
+        "Xi, J.; Long, M.; Tang, L.; Wang, D.; Shuai, Z. Nanoscale 2012, 4, 4348–4369."],
     "能隙定律 / 振动分辨光谱": ["Englman, R.; Jortner, J. Mol. Phys. 1970, 18, 145–164."],
     "相互作用能 (抵消校正 / UFF / 能量框架)": [
         "Boys, S. F.; Bernardi, F. Mol. Phys. 1970, 19, 553–566.",

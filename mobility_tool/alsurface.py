@@ -155,6 +155,30 @@ class _GP:
             var = var + (Rb * Rb).sum(0)
         return m, np.sqrt(np.clip(var, 0, None))
 
+    def loo(self, groups):
+        """Leave-one-group-out residuals of the training data (fixed hyperparameters, β re-estimated: the
+        universal-kriging projector P = K⁻¹ − K⁻¹H(HᵀK⁻¹H)⁻¹HᵀK⁻¹). groups: integer label per training row
+        (all symmetry images of one DFT point share a label). Returns the standardized residual
+        z = e/√var of one representative row per group."""
+        K = self._k(self.X, self.X, self.theta) + (self.noise ** 2 + 1e-8) * np.eye(len(self.X))
+        Ki = cho_solve(cho_factor(K, lower=True), np.eye(len(self.X)))
+        H = np.ones((len(self.X), 1)) if self.H is None else self.H
+        KiH = Ki @ H
+        P = Ki - KiH @ np.linalg.solve(H.T @ KiH + 1e-10 * np.eye(H.shape[1]), KiH.T)
+        Py = P @ self.y
+        groups = np.asarray(groups)
+        z = []
+        for g in np.unique(groups):
+            B = np.flatnonzero(groups == g)
+            try:
+                C = np.linalg.inv(P[np.ix_(B, B)])
+            except np.linalg.LinAlgError:
+                continue
+            e = C @ Py[B]
+            if C[0, 0] > 0:
+                z.append(e[0] / np.sqrt(C[0, 0]))
+        return np.array(z)
+
     def post_cov(self, A, B, Ha=None, Hb=None):
         """后验协方差 cov(f(A), f(B))。"""
         KaX = self._k(A, self.X, self.theta)
@@ -192,15 +216,17 @@ class GPSurface:
                 for op in ops:
                     q = apply_op(v, op) if op != "E" else v
                     rows.append(_q(q) + [float(r[c]) for c in carriers]
-                                + ([float(B0[c][n]) for c in carriers] if baseline is not None else []))
+                                + ([float(B0[c][n]) for c in carriers] if baseline is not None else []) + [n])
         if not rows:
             raise ValueError("没有可用的训练数据")
         A = np.array(rows, float)
+        grp, A = A[:, -1].astype(int), A[:, :-1]
         U = self.scale(A[:, :6])
         ok = (np.abs(U) <= keep).all(1)
-        A, U = A[ok], U[ok]
+        A, U, grp = A[ok], U[ok], grp[ok]
         _, idx = np.unique(np.round(U, 4), axis=0, return_index=True)
-        A, U = A[np.sort(idx)], U[np.sort(idx)]
+        A, U, grp = A[np.sort(idx)], U[np.sort(idx)], grp[np.sort(idx)]
+        self.groups = grp
         if len(A) < 4:
             raise ValueError(f"中心附近只有 {len(A)} 个训练构型")
         self.U, self.n = U, len(A)
@@ -223,9 +249,23 @@ class GPSurface:
 
     @property
     def inflate(self):
+        if self.ci_inflate == "loo":
+            return self.loo_factor()
         if self.ci_inflate is not None:
             return self.ci_inflate
         return CI_INFLATE_DELTA if self.baseline is not None else CI_INFLATE
+
+    def loo_z(self, carrier):
+        """Standardized leave-one-out residuals of the DFT points of this pair (one per DFT point)."""
+        return self.gp[carrier].loo(self.groups)
+
+    def loo_factor(self, carriers=None, floor=1.0):
+        """Calibration factor from the data of this pair: RMS of the standardized leave-one-out residuals of both
+        carriers (≥ floor). A calibrated GP gives 1; c > 1 means that the posterior is too narrow by that factor."""
+        if getattr(self, "_loo_c", None) is None:
+            z = np.concatenate([self.loo_z(c) for c in (carriers or self.carriers)])
+            self._loo_c = float(np.sqrt(np.mean(z * z))) if len(z) >= 5 else float(CI_INFLATE)
+        return max(floor, self._loo_c)
 
     def H(self, Q, carrier):
         """预测点的基函数 (1, V_base)；没有基线时为 None。"""
@@ -327,6 +367,84 @@ def select_spread(pool, thermal_center, half, k, seed=0):
     return chosen
 
 
+# worker processes for large EHT batches (frame-resolved TLT, MD couplings); set by the --jobs option of the CLI
+EHT_JOBS = 1
+EHT_PARALLEL_MIN = 2000
+EHT_PROGRESS = True       # progress lines for parallel batches of 50 000 or more configurations
+_POOLS = {}
+_WORKER = {}
+
+
+_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS")
+
+
+class _single_thread_env:
+    """One BLAS/LAPACK thread in the worker processes. Without it every worker starts as many BLAS threads as there
+    are cores (MKL / OpenBLAS default), so J workers run J × J threads on J cores and the EHT diagonalizations slow
+    down several-fold instead of speeding up. The workers are spawned while this is active and read it at start-up;
+    the main process keeps its own setting."""
+
+    def __enter__(self):
+        import os
+        self.old = {k: os.environ.get(k) for k in _THREAD_VARS}
+        for k in _THREAD_VARS:
+            os.environ[k] = "1"
+        return self
+
+    def __exit__(self, *exc):
+        import os
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
+def _eht_init(symbols, Y, mirror, nd):
+    try:                                                # in case numpy was loaded before the variables took effect
+        from threadpoolctl import threadpool_limits
+        _WORKER["limits"] = threadpool_limits(1)
+    except Exception:  # noqa: BLE001 — threadpoolctl is optional
+        pass
+    _WORKER["b"] = EHTBaseline(symbols, Y, mirror=mirror, nd=nd)
+
+
+def _worker_threads(_):
+    """Thread settings seen by a worker (test helper)."""
+    import os
+    return {k: os.environ.get(k) for k in _THREAD_VARS}
+
+
+def _eht_chunk(Q):
+    b = _WORKER["b"]
+    return np.array([b._one(q) for q in Q])
+
+
+def _eht_pool(b, jobs):
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    key = (tuple(b.sym), b.Y.tobytes(), b.mirror, b.nd, jobs)
+    if key not in _POOLS:
+        if not _POOLS:                                  # close the workers before the interpreter shuts down
+            import atexit
+            atexit.register(_shutdown_pools)
+        _POOLS[key] = ProcessPoolExecutor(jobs, mp_context=mp.get_context("spawn"), initializer=_eht_init,
+                                          initargs=(b.sym, b.Y, b.mirror, b.nd))
+    return _POOLS[key]
+
+
+def _shutdown_pools():
+    """Stop the EHT worker processes at exit (avoids 'Exception ignored in ... weakref_cb' on Windows)."""
+    for p in list(_POOLS.values()):
+        try:
+            p.shutdown(wait=True, cancel_futures=True)
+        except Exception:  # noqa: BLE001
+            pass
+    _POOLS.clear()
+
+
 class EHTBaseline:
     """Δ-学习的基线：软件内 EHT 计算二聚体 (A 在原点、B 按 q 放置) 的 HOMO / LUMO 有效耦合 (meV)。
     与 ADF 片段法相同，B 用同一套单体轨道旋转得到，因此相位与 ADF 一致 (相差的整体缩放和符号由 β₁ 吸收)。
@@ -343,19 +461,63 @@ class EHTBaseline:
         self.cache = {}
 
     def _one(self, q):
-        from .eht import build_basis, eht_transfer_integrals, rotate_coefficients
+        """HOMO and LUMO J_eff (meV) of one dimer; the same numbers as eht_transfer_integrals(..., _mono_b=...)
+        without its per-call overhead (basis, orbital indices and monomer A are prepared once)."""
+        from .eht import BOHR, _coupling_block, rotate_coefficients
         from .surrogate import build_B, rotation
         z, dx, dy, ga, pi, ro = map(float, q)
         R = rotation(ga, ro, pi)
         B = build_B(self.Y, z, dx, dy, ga, ro, pi, mirror=self.mirror)
-        shells, _, _ = build_basis(self.sym, B)
+        if not hasattr(self, "_tpl"):
+            from .eht import build_basis
+            self._tpl = build_basis(self.sym, self.Y)[0]
+            self._monoA = dict(self.mono, shells=self._tpl)
+            self._idx = (self.mono["nocc"] - 1, self.mono["nocc"])
+        Xb = np.asarray(B, float) / BOHR
+        shells = [dict(sh, center=Xb[sh["atom"]]) for sh in self._tpl]
         mb = dict(self.mono_b, shells=shells, C=rotate_coefficients(self.mono_b["shells"], self.mono_b["C"], R))
-        r = eht_transfer_integrals(self.A, [(s, *p) for s, p in zip(self.sym, B)], esd=False, _mono_b=mb)["results"]
-        return r["HOMO"]["J_eff_meV"], r["LUMO"]["J_eff_meV"]
+        sab, hab = _coupling_block(self._monoA, mb)
+        out = []
+        for i in self._idx:
+            ca, cb = self.mono["C"][:, i], mb["C"][:, i]
+            j, s_ = float(ca @ hab @ cb), float(ca @ sab @ cb)
+            ea, eb = float(self.mono["e"][i]), float(self.mono_b["e"][i])
+            out.append((j - 0.5 * (ea + eb) * s_) / (1 - s_ ** 2) * 1000)
+        return out[0], out[1]
 
     def values(self, Q):
+        Q = np.atleast_2d(np.asarray(Q, float))
+        jobs = int(EHT_JOBS or 1)
+        if jobs > 1 and len(Q) >= EHT_PARALLEL_MIN:
+            keys = [tuple(np.round(q, self.nd)) for q in Q]
+            todo = {}
+            for k, q in zip(keys, Q):
+                if k not in self.cache and k not in todo:
+                    todo[k] = q
+            if len(todo) >= EHT_PARALLEL_MIN:
+                try:
+                    kk = list(todo)
+                    X = np.array([todo[k] for k in kk])
+                    n = max(50, min(2000, len(X) // (8 * jobs) + 1))
+                    chunks = [X[i:i + n] for i in range(0, len(X), n)]
+                    res = []
+                    import time
+                    t0, step = time.time(), max(1, len(chunks) // 10)
+                    with _single_thread_env():
+                        for k, r in enumerate(_eht_pool(self, jobs).map(_eht_chunk, chunks), 1):
+                            res.append(r)
+                            if EHT_PROGRESS and len(X) >= 50000 and (k % step == 0 or k == len(chunks)):
+                                done = min(k * n, len(X))
+                                el = time.time() - t0
+                                print(f"    EHT baseline: {done}/{len(X)} configurations on {jobs} processes, "
+                                      f"{el / 60:.1f} min, about {el / done * (len(X) - done) / 60:.0f} min left",
+                                      flush=True)
+                    for k, v in zip(kk, np.concatenate(res)):
+                        self.cache[k] = (float(v[0]), float(v[1]))
+                except Exception as e:  # noqa: BLE001 — fall back to one process
+                    print(f"[提示] 并行 EHT 失败 ({type(e).__name__}: {e})，改为单进程计算", flush=True)
         out = np.empty((len(Q), 2))
-        for i, q in enumerate(np.atleast_2d(np.asarray(Q, float))):
+        for i, q in enumerate(Q):
             key = tuple(np.round(q, self.nd))
             if key not in self.cache:
                 self.cache[key] = self._one(q)
@@ -586,11 +748,22 @@ class ALRun:
             self._base[mirror] = EHTBaseline(self.proj.symbols, self.proj.Y, mirror=mirror)
         return self._base[mirror]
 
+    @property
+    def calib(self):
+        return self.state.get("calib", "fixed")
+
+    def set_calib(self, calib):
+        self.state["calib"] = calib
+        self._save()
+
     def surface(self, ceds, gid, recs, restarts=3):
         mirror = bool(self.state.get("mirror", {}).get(str(gid)))
-        return GPSurface(recs, self.state["centers"][str(gid)] if str(gid) in self.state["centers"]
-                         else self.state["centers"][gid], half=self.state["half"][str(gid)], ops=ceds.ops,
-                         restarts=restarts, reverse=not mirror, baseline=self.baseline(gid))
+        s = GPSurface(recs, self.state["centers"][str(gid)] if str(gid) in self.state["centers"]
+                      else self.state["centers"][gid], half=self.state["half"][str(gid)], ops=ceds.ops,
+                      restarts=restarts, reverse=not mirror, baseline=self.baseline(gid))
+        if self.calib == "loo":
+            s.ci_inflate = "loo"
+        return s
 
     def baseline_check(self, recs):
         """各近邻对已算 DFT 数据与 EHT 基线的相关性：{组号: {载流子: {r, slope, ...}}}。"""
@@ -641,6 +814,11 @@ class ALRun:
                 continue
             s = self.surface(ceds, g, rs)
             fitted[g] = s
+            try:
+                row["c_loo"] = s.loo_factor(floor=0.0)
+            except Exception:  # noqa: BLE001
+                row["c_loo"] = None
+            row["c_used"] = float(s.inflate)
             ok = True
             for c in ("hole", "electron"):
                 u = s.stat_uncertainty(thermal[g], c)
@@ -905,5 +1083,49 @@ def al_report(rows):
                 s += f"{u['mean']:7.1f}±{(u['mean_hi'] - u['mean_lo']) / 2:4.1f} / {u['std']:5.1f}±{100 * u['std_rel']:3.0f}%   "
             else:
                 s += f"{'—':<30}"
+        if r.get("c_loo") is not None:
+            s += f"c_LOO {r['c_loo']:.2f}" + (f" / c {r['c_used']:.2f}" if r.get("c_used") is not None else "")
         L.append(s)
     return "\n".join(L)
+
+def calib_report(surf, thermal, factors=(1.5, 2.0, 2.5)):
+    """Per pair: c_LOO of each carrier and of both together, and the relative 95% half width of σ_V for the fixed
+    factors in `factors` and for c_LOO. Returns (rows, text)."""
+    rows = []
+    for g in sorted(surf):
+        s = surf[g]
+        if not hasattr(s, "loo_z"):
+            continue
+        old = s.ci_inflate
+        r = {"gid": g, "n": int(len(s.groups)) if getattr(s, "groups", None) is not None else None}
+        zs = {}
+        for c in s.carriers:
+            z = np.asarray(s.loo_z(c), float)
+            zs[c] = z
+            r[f"c_loo_{c}"] = float(np.sqrt(np.mean(z * z)))
+            r[f"cov95_{c}"] = float(np.mean(np.abs(z) <= 1.96))
+        zz = np.concatenate(list(zs.values()))
+        r["c_loo"] = float(np.sqrt(np.mean(zz * zz)))
+        for c in s.carriers:
+            for k in tuple(factors) + ("loo",):
+                s.ci_inflate = max(1.0, r["c_loo"]) if k == "loo" else float(k)
+                u = s.stat_uncertainty(thermal[g], c)
+                r[f"std_{c}"] = u["std"]
+                r[f"rel_{c}_{k}"] = u["std_rel"]
+        s.ci_inflate = old
+        rows.append(r)
+    hdr = f"{'pair':<5}{'n':>5}{'c_LOO 空穴/电子/合':>20}{'|z|≤1.96 空穴/电子':>20}   " + "  ".join(
+        f"{('c=' + format(k, 'g')) if k != 'loo' else 'c_LOO':>12}" for k in tuple(factors) + ("loo",))
+    L = [hdr, " " * 50 + "  σ_V 95% 半宽 (空穴/电子, %)"]
+    for r in rows:
+        cs = list(k[6:] for k in r if k.startswith("c_loo_"))
+        s = (f"G{r['gid']:<4}{r['n'] if r['n'] is not None else '':>5}"
+             f"{'/'.join(format(r['c_loo_' + c], '.2f') for c in cs) + '/' + format(r['c_loo'], '.2f'):>20}"
+             f"{'/'.join(format(100 * r['cov95_' + c], '.0f') + '%' for c in cs):>20}   ")
+        s += "  ".join(f"{'/'.join(format(100 * r[f'rel_{c}_{k}'], '.0f') for c in cs):>12}"
+                       for k in tuple(factors) + ("loo",))
+        L.append(s)
+    if rows:
+        allc = np.array([r["c_loo"] for r in rows])
+        L.append(f"c_LOO：中位数 {np.median(allc):.2f}，范围 {allc.min():.2f} – {allc.max():.2f} ({len(allc)} 个近邻对)")
+    return rows, "\n".join(L)

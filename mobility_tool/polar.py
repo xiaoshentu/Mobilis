@@ -285,6 +285,7 @@ def write_charge_inputs(symbols, X, prefix, level="B3LYP/6-31G(d)", nproc=8, mem
     from .gaussian_io import write_gjf
     atoms = [(s, *map(float, x)) for s, x in zip(symbols, np.asarray(X, float))]
     nel = sum(_Z.get(e, 0) for e in symbols)
+    Path(prefix).parent.mkdir(parents=True, exist_ok=True)
     out = []
     for tag, ch in (("neutral", 0), ("cation", 1), ("anion", -1)):
         mult = 1 if (nel - ch) % 2 == 0 else 2
@@ -358,6 +359,86 @@ def _cluster_energies(Xm, ci, alpha1, q0, dq, on_iter=None):
     return out, {"atoms": M * nat, "molecules": M, "iterations": th.iterations, "matvec": th.n_matvec}
 
 
+def _match_perm(A, B, sym, tol):
+    """A、B 为同一分子的两组坐标 (nat,3)：返回 perm 使 A[i] ≈ B[perm[i]] 且元素相同；不对应时返回 None。"""
+    d = np.linalg.norm(A[:, None, :] - B[None, :, :], axis=2)
+    perm = d.argmin(1)
+    if d[np.arange(len(A)), perm].max() > tol or len(set(perm.tolist())) != len(A):
+        return None
+    if any(sym[i] != sym[perm[i]] for i in range(len(A))):
+        return None
+    return perm
+
+
+def symmetry_equivalent_sites(lattice, frames, Y, symbols=None, charge_sets=(), tol=0.25, qtol=0.05):
+    """晶胞中各分子的对称等价关系。返回 (equiv, dq)：equiv[k] 为与分子 k 等价的最小序号 (不与更小序号等价时为 k)，
+    dq[k] 为等价映射下原子电荷的最大差 (e)。
+    判据：等距变换 x -> (x - c_j) M + c_k (M 可含单体自身的对称操作，如并苯的 D2h) 把分子 j 映到分子 k，
+    保持晶格 (晶格矢量映为整数组合)，并把晶胞内每个分子映到某个分子的晶格平移像；原子对应下各组电荷
+    (charge_sets，如 q0、Δq_h、Δq_e) 相差不超过 qtol。这样的变换是整个晶体 (含电荷) 的对称操作，两分子的
+    团簇能量相同。非真转动同样成立：位点能是标量。"""
+    lat = np.asarray(lattice, float)
+    inv_lat = np.linalg.inv(lat)
+    Y = np.asarray(Y, float)
+    nat = len(Y)
+    sym = list(symbols) if symbols is not None else ["X"] * nat
+    qs = [np.asarray(q, float) for q in charge_sets if q is not None]
+    base = np.array([Y @ np.asarray(ax, float).T + np.asarray(c, float) for ax, c in frames])
+    nk = len(frames)
+    # 单体自身的对称操作 (行向量形式 Y @ Q ≈ Y[π])：惯量主轴的 8 种符号组合
+    Yc = Y - Y.mean(0)
+    _, V = np.linalg.eigh(Yc.T @ Yc)
+    selfops = []
+    for sx in (1, -1):
+        for sy in (1, -1):
+            for sz in (1, -1):
+                Q = V @ np.diag([sx, sy, sz]) @ V.T
+                if _match_perm(Yc @ Q, Yc, sym, tol) is not None:
+                    selfops.append(Q)
+
+    def check(j, k):
+        axj, cj = np.asarray(frames[j][0], float), np.asarray(frames[j][1], float)
+        axk, ck = np.asarray(frames[k][0], float), np.asarray(frames[k][1], float)
+        # 质心对质心：x -> (x - g_j) M + g_k
+        gj, gk = base[j].mean(0), base[k].mean(0)
+        for Q in selfops:
+            M = np.linalg.solve(axj.T, Q @ axk.T)
+            if not np.allclose(M @ M.T, np.eye(3), atol=0.02):
+                continue
+            n = (lat @ M) @ inv_lat                             # 拟合误差使 M 略偏离严格的对称操作
+            if np.abs(n - np.round(n)).max() > 0.02:
+                continue
+            worst = 0.0
+            for m in range(nk):
+                img = (base[m] - gj) @ M + gk
+                found = False
+                for m2 in range(nk):
+                    t = np.round(((img.mean(0) - base[m2].mean(0)) @ inv_lat))
+                    perm = _match_perm(img, base[m2] + t @ lat, sym, tol)
+                    if perm is None:
+                        continue
+                    dev = max([float(np.abs(q[perm] - q).max()) for q in qs] or [0.0])
+                    if dev <= qtol:
+                        worst = max(worst, dev)
+                        found = True
+                        break
+                if not found:
+                    break
+            else:
+                return worst
+        return None
+
+    equiv, dqs = list(range(nk)), [0.0] * nk
+    for k in range(nk):
+        for j in range(k):
+            if equiv[j] == j:
+                w = check(j, k)
+                if w is not None:
+                    equiv[k], dqs[k] = j, w
+                    break
+    return equiv, dqs
+
+
 def site_energies(lattice, frames, symbols, Y, charges, radii=DEFAULT_RADII, alpha_table=None, on_progress=None):
     """晶胞中各独立分子的极化位点能。charges = charge_set(...)。
     返回 {"sites": [{k, rows: [{R, h: {...}, e: {...}, atoms}], h: {...外推}, e: {...}}], "P_plus", "P_minus", ...}。"""
@@ -367,7 +448,15 @@ def site_energies(lattice, frames, symbols, Y, charges, radii=DEFAULT_RADII, alp
     density = len(frames) / abs(np.linalg.det(np.asarray(lattice, float)))
     eps_ll = lorentz_lorenz(float(np.trace(alpha_mol) / 3), density)
     sites = []
+    equiv, dqe = symmetry_equivalent_sites(lattice, frames, Y, symbols,
+                                           (charges.get("q0"), charges.get("dq_h"), charges.get("dq_e")))
     for k in range(len(frames)):
+        if equiv[k] != k:
+            j = equiv[k]
+            if on_progress:
+                on_progress(f"分子 {k + 1}/{len(frames)} 与分子 {j + 1} 对称等价 (电荷最大差 {dqe[k]:.3f} e)，沿用其结果")
+            sites.append(dict(sites[j], k=k, equiv_of=j))
+            continue
         rows = []
         for R in radii:
             if on_progress:
@@ -638,7 +727,7 @@ def plot_extrapolation(ax, res):
             ax.plot(x, -(base + ex.get("pol_fit", ex["pol"]) + ex["slope"] * x), "-", color=cols[car], lw=1.0,
                     alpha=0.5)
             ax.plot([0], [-ex["total"]], "*", color=cols[car], ms=11, mec="k", mew=0.5)
-    ax.set_xlabel("1 / R (Å⁻¹)")
+    ax.set_xlabel("1 / R (Å$^{-1}$)")
     ax.set_ylabel("极化能 P (eV)")
     ax.text(0.98, 0.02, "★ 采用的 R → ∞ 值", transform=ax.transAxes, ha="right", va="bottom", fontsize=8)
     ax.set_xlim(left=0)

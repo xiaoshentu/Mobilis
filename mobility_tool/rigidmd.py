@@ -157,18 +157,19 @@ class RigidCrystalMD:
         shifts = np.array([(i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)])
         S = shifts @ self.box
         ii, jj, aa, bb, ss = [], [], [], [], []
+        # candidate molecule pairs by centroid distance (vectorized over J and the 27 images), visited in the order
+        # (I, J, image) so that the pair list is the same as that of a plain triple loop
+        self_ok = np.array([tuple(s) > (0, 0, 0) for s in shifts])
         for I in range(self.N):
-            for J in range(I, self.N):
-                for si, s in enumerate(shifts):
-                    if I == J and tuple(s) <= (0, 0, 0):
-                        continue
-                    d = self.c0[J] + S[si] - self.c0[I]
-                    if np.linalg.norm(d) > cut + 2 * Rmol:
-                        continue
-                    D = np.linalg.norm(X[J][None, :, :] + S[si] - X[I][:, None, :], axis=-1)
-                    a, b = np.nonzero(D < cut)
-                    ii.append(np.full(len(a), I)); jj.append(np.full(len(a), J))
-                    aa.append(a); bb.append(b); ss.append(np.full(len(a), si))
+            dc = np.linalg.norm(self.c0[I:, None, :] + S[None, :, :] - self.c0[I], axis=-1)      # (N−I, 27)
+            near = dc <= cut + 2 * Rmol
+            near[0] &= self_ok
+            for dJ, si in zip(*np.nonzero(near)):
+                J = I + int(dJ)
+                D = np.linalg.norm(X[J][None, :, :] + S[si] - X[I][:, None, :], axis=-1)
+                a, b = np.nonzero(D < cut)
+                ii.append(np.full(len(a), I)); jj.append(np.full(len(a), J))
+                aa.append(a); bb.append(b); ss.append(np.full(len(a), si))
         self.pI, self.pJ = np.concatenate(ii), np.concatenate(jj)
         self.pa, self.pb = np.concatenate(aa), np.concatenate(bb)
         self.pS = S[np.concatenate(ss)]
@@ -237,7 +238,7 @@ class RigidCrystalMD:
             pi = np.einsum("nji,nj->ni", R, pi)                         # π ← Rᵀ π
         return Q, pi
 
-    def run(self, T, n_steps, dt=5.0, gamma=1e-3, every=4, seed=1, state=None, on_frame=None):
+    def run(self, T, n_steps, dt=5.0, gamma=1e-3, every=4, seed=1, state=None, on_frame=None, progress=None):
         """BAOAB Langevin。gamma/fs⁻¹ (1e-3 = 1 ps⁻¹)。返回 (frames, state)；
         frames: c (帧, N, 3) 质心、Q (帧, N, 3, 3) 主轴取向、E 势能、T_tr / T_rot 平动 / 转动温度。"""
         rng = np.random.default_rng(seed)
@@ -271,6 +272,8 @@ class RigidCrystalMD:
                 out["T_rot"].append((pi * pi / self.I).sum() / (3 * self.N * KB * KCAL2MD))
                 if on_frame:
                     on_frame(step, n_steps)
+            if progress:
+                progress(step, n_steps)
         frames = {k: np.array(v_) for k, v_ in out.items()}
         frames["dt_frame_fs"] = every * dt
         return frames, (c, Q, v, pi)
@@ -300,6 +303,90 @@ def load_frames(path):
     d = np.load(path)
     return {"c": d["c"].astype(float), "Q": d["Q"].astype(float), "E": d["E"], "T_tr": d["T_tr"],
             "T_rot": d["T_rot"], "dt_frame_fs": float(d["dt_frame_fs"]) if "dt_frame_fs" in d else 20.0}
+
+
+TRAJ_KEYS = ("T", "supercell", "N", "dt", "every", "equil_ps", "prod_ps", "gamma", "gamma_eq", "rc")
+
+
+def traj_meta(md, T, opts):
+    """What a saved trajectory must agree with to be reused: temperature, supercell, MD settings, force field
+    note and the lattice of the crystal (seeds are fixed by T, so the same settings give the same trajectory)."""
+    o = dict(DEFAULTS, **(opts or {}))
+    return {"T": float(T), "supercell": [int(x) for x in md.sc], "N": int(md.N), "dt": float(o["dt"]),
+            "every": int(o["every"]), "equil_ps": float(o["equil_ps"]), "prod_ps": float(o["prod_ps"]),
+            "gamma": float(o["gamma"]), "gamma_eq": float(o["gamma_eq"]), "rc": float(getattr(md, "rc", o["rc"])),
+            "ff": str(getattr(md, "ff_note", "")), "charges": _digest(getattr(md, "q", None)),
+            "lattice": np.asarray(md.lat, float).round(6).tolist()}
+
+
+def _digest(x):
+    import hashlib
+    if x is None:
+        return ""
+    return hashlib.sha1(np.round(np.asarray(x, float), 5).tobytes()).hexdigest()[:16]
+
+
+def save_trajectory(path, md, frames, meta):
+    import json
+    import os
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    md.save(path, frames)
+    with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=1)
+
+
+def load_trajectory(path, md, meta):
+    """Frames of a saved trajectory if it exists and its settings (json next to the npz) equal meta; else None."""
+    import json
+    import os
+    js = os.path.splitext(path)[0] + ".json"
+    if not os.path.exists(path):
+        return None
+    if not os.path.exists(js):
+        return _load_legacy(path, meta)
+    try:
+        old = json.load(open(js, encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for k in TRAJ_KEYS + ("ff", "charges"):
+        if old.get(k) != meta.get(k):
+            return None
+    if not np.allclose(np.asarray(old.get("lattice"), float), np.asarray(meta["lattice"], float), atol=1e-5):
+        return None
+    try:
+        fr = load_frames(path)
+    except (OSError, ValueError, KeyError):
+        return None
+    n_exp = int(round(meta["prod_ps"] * 1000 / meta["dt"])) // meta["every"]
+    if len(fr["c"]) < n_exp - 1 or fr["c"].shape[1] != meta["N"]:
+        return None
+    return fr
+
+
+def _load_legacy(path, meta):
+    """A trajectory saved by --save-traj before v1.28.2 (npz without the json of settings): reused when the supercell,
+    lattice, number of molecules, frame interval and number of frames agree; the file name gives the temperature.
+    Force field, charges and thermostat cannot be checked and are taken to be the same (the note says so)."""
+    import os
+    if os.path.basename(path) != f"md_{meta['T']:g}K.npz":
+        return None
+    try:
+        d = np.load(path)
+        sc = [int(x) for x in d["supercell"]]
+        lat = np.asarray(d["lattice"], float)
+        dtf = float(d["dt_frame_fs"]) if "dt_frame_fs" in d else None
+    except (OSError, ValueError, KeyError):
+        return None
+    if sc != meta["supercell"] or not np.allclose(lat, np.asarray(meta["lattice"], float), atol=1e-5):
+        return None
+    if dtf is None or abs(dtf - meta["dt"] * meta["every"]) > 1e-6:
+        return None
+    fr = load_frames(path)
+    n_exp = int(round(meta["prod_ps"] * 1000 / meta["dt"])) // meta["every"]
+    if len(fr["c"]) < n_exp - 1 or fr["c"].shape[1] != meta["N"]:
+        return None
+    fr["legacy"] = True
+    return fr
 
 
 def md_pair_params(md, frames, pair, g_matrix, recenter=True, q0=None):
@@ -339,9 +426,31 @@ def autocorr_time(V, dt_fs, floor=0.05):
     return float(a[:cut].sum() * dt_fs), a[:min(n, 100)]
 
 
-def md_couplings(ceds, md, frames, surfaces, T, recenter=True, vmin=3.0, max_eval_eht=1200):
+PROGRESS_MIN = 20000      # md_couplings reports progress for pairs with at least this many configurations
+
+
+def _eval_progress(surf, q, carrier, progress, label):
+    """surf(q, carrier) in about 20 chunks with progress and remaining time (Δ-GP surfaces evaluate the EHT baseline
+    at every configuration: 10^5 configurations take an hour on one core)."""
+    import time
+    n = len(q)
+    if progress is None or n < PROGRESS_MIN:
+        return surf(q, carrier)
+    step = max(2000, -(-n // 20))
+    out, t0 = [], time.time()
+    for a in range(0, n, step):
+        out.append(np.asarray(surf(q[a:a + step], carrier)))
+        b = min(a + step, n)
+        el = time.time() - t0
+        progress(f"coupling statistics {label}: {100 * b / n:3.0f}% ({b}/{n} configurations), "
+                 f"elapsed {el / 60:.1f} min, about {el / b * (n - b) / 60:.0f} min left")
+    return np.concatenate(out)
+
+
+def md_couplings(ceds, md, frames, surfaces, T, recenter=True, vmin=3.0, max_eval_eht=1200, progress=None):
     """一段轨迹 → 每个唯一二聚体的 ⟨V⟩、σ_V、参数分配、相关时间；格式与 CEDS.run 相同 (可直接给 tlt / export_csv)。
-    EHT 曲面逐点计算较慢：等间隔抽帧，使样本数不超过 max_eval_eht (相关时间按抽帧后的间隔计算，较粗)。"""
+    EHT 曲面逐点计算较慢：等间隔抽帧，使样本数不超过 max_eval_eht (相关时间按抽帧后的间隔计算，较粗)。
+    progress(text): reports the pairs and, for large pairs, the evaluation progress (_eval_progress)."""
     from .ceds import CARRIERS, OPS, PARAM_KEYS
     nf0 = len(frames["c"])
     dtf0 = float(frames.get("dt_frame_fs", 20.0))
@@ -365,6 +474,9 @@ def md_couplings(ceds, md, frames, surfaces, T, recenter=True, vmin=3.0, max_eva
             fr = {"c": frames["c"][::stride], "Q": frames["Q"][::stride]}
             nf, dtf = len(fr["c"]), dtf0 * stride
         q, qm = md_pair_params(md, fr, p, G, recenter=recenter, q0=p["q0"])
+        if progress is not None:
+            progress(f"coupling statistics G{p['gid']}: {len(q)} configurations ({nf} frames × {len(q) // max(nf, 1)} "
+                     f"dimers), {surf.source} surface")
         out = {"gid": p["gid"], "T": T, "source": surf.source, "surface": surf.describe(),
                "frozen": list(getattr(surf, "frozen", [])), "coverage": surf.coverage(q),
                "q_std": dict(zip(PARAM_KEYS, q.std(0))), "q0": p["q0"],
@@ -372,7 +484,7 @@ def md_couplings(ceds, md, frames, surfaces, T, recenter=True, vmin=3.0, max_eva
                "mc": {"U_eq": [ue, ue]}, "n_samples": len(q)}
         for c in CARRIERS:
             chi = ceds.chi(c, p["g"])
-            V = chi * surf(q, c)
+            V = chi * _eval_progress(surf, q, c, progress, f"G{p['gid']} {c}")
             m, s = float(V.mean()), float(V.std(ddof=1))
             act = [i for i, k in enumerate(PARAM_KEYS) if k not in out["frozen"] and q[:, i].std() > 1e-9]
             share = {}
@@ -389,21 +501,113 @@ def md_couplings(ceds, md, frames, surfaces, T, recenter=True, vmin=3.0, max_eva
     return res
 
 
-def run_temperature(md, T, opts=None):
-    """一个温度：平衡 + 采样 (随机数种子 T 与 T+1，与 md_temperature_series 相同)。返回采样轨迹。"""
+def run_temperature(md, T, opts=None, report=None):
+    """一个温度：平衡 + 采样 (随机数种子 T 与 T+1，与 md_temperature_series 相同)。返回采样轨迹。
+    report(text)：每完成 5% 的步数报告一次进度与预计剩余时间。"""
+    import time
     o = dict(DEFAULTS, **(opts or {}))
     n_eq = int(round(o["equil_ps"] * 1000 / o["dt"]))
     n_pr = int(round(o["prod_ps"] * 1000 / o["dt"]))
-    _, st = md.run(float(T), n_eq, o["dt"], o["gamma_eq"], every=max(n_eq, 1), seed=int(T))
-    fr, _ = md.run(float(T), n_pr, o["dt"], o["gamma"], every=o["every"], seed=int(T) + 1, state=st)
+    total, t0 = n_eq + n_pr, time.time()
+
+    def prog(offset):
+        if not report:
+            return None
+
+        def f(step, n):
+            done = offset + step
+            if done % max(1, total // 20):
+                return
+            el = time.time() - t0
+            left = el / done * (total - done)
+            report(f"MD T = {T:g} K: {100 * done / total:3.0f}% ({done}/{total} steps), "
+                   f"elapsed {el / 60:.1f} min, about {left / 60:.0f} min left")
+        return f
+    _, st = md.run(float(T), n_eq, o["dt"], o["gamma_eq"], every=max(n_eq, 1), seed=int(T), progress=prog(0))
+    fr, _ = md.run(float(T), n_pr, o["dt"], o["gamma"], every=o["every"], seed=int(T) + 1, state=st,
+                   progress=prog(n_eq))
     return fr
+
+
+# thresholds of the lattice-stability check (stability_check)
+STAB_UEQ_RATIO = 2.0      # MD U_eq / crystallographic U_eq
+STAB_UEQ_GROWTH = 1.3     # U_eq of the second half of the production run / first half
+STAB_DRIFT_A = 0.5        # largest displacement of a molecular centre between the first and last quarter / Å
+
+
+def stability_check(md, frames, ueq_ref=None):
+    """Lattice stability of one MD run. A crystal that the force field does not hold (molecules sliding along the
+    long axis, a slow phase change) shows up as (i) a U_eq far above the crystallographic value, (ii) a U_eq that
+    keeps growing during the production run, (iii) molecular centres that move away from their lattice sites.
+    Returns a dict with the three numbers, the thresholds that were crossed (`flags`) and `stable`."""
+    n = len(frames["c"])
+    h = max(n // 2, 1)
+    q = max(n // 4, 1)
+    u1 = md.u_eq({k: v[:h] for k, v in frames.items() if k in ("c", "Q")})
+    u2 = md.u_eq({k: v[h:] for k, v in frames.items() if k in ("c", "Q")})
+    c = frames["c"] - frames["c"].mean(1, keepdims=True)
+    drift = np.linalg.norm(c[-q:].mean(0) - c[:q].mean(0), axis=-1)
+    out = {"U_eq": md.u_eq(frames), "U_eq_first_half": u1, "U_eq_second_half": u2,
+           "growth": u2 / u1 if u1 > 0 else float("nan"),
+           "drift_max_A": float(drift.max()), "drift_mean_A": float(drift.mean()), "U_eq_ref": ueq_ref}
+    flags = []
+    if ueq_ref:
+        out["ratio_ref"] = out["U_eq"] / ueq_ref
+        if out["ratio_ref"] > STAB_UEQ_RATIO:
+            flags.append("ratio_ref")
+    if out["growth"] > STAB_UEQ_GROWTH:
+        flags.append("growth")
+    if out["drift_max_A"] > STAB_DRIFT_A:
+        flags.append("drift")
+    out["flags"], out["stable"] = flags, not flags
+    return out
+
+STAB_UEQ_PER_T = 1.5      # U_eq/T relative to the lowest temperature of the series (harmonic lattice: constant)
+
+
+def series_check(rows):
+    """Across a temperature series: a harmonic lattice has U_eq ∝ T. Marks rows whose U_eq/T exceeds that of the
+    lowest temperature by STAB_UEQ_PER_T (adds 'anharmonic' to the flags). Returns the list of flagged T."""
+    rr = sorted(rows, key=lambda r: r["T"])
+    if len(rr) < 2:
+        return []
+    k0 = rr[0]["U_eq"] / rr[0]["T"]
+    bad = []
+    for r in rr[1:]:
+        st = r.get("stability")
+        x = (r["U_eq"] / r["T"]) / k0
+        if st is not None:
+            st["ueq_per_T_rel"] = x
+            if x > STAB_UEQ_PER_T and "anharmonic" not in st["flags"]:
+                st["flags"].append("anharmonic")
+                st["stable"] = False
+        if x > STAB_UEQ_PER_T:
+            bad.append(r["T"])
+    return bad
+
+
+def stability_text(T, st):
+    """One line per temperature; a warning when a threshold is crossed."""
+    s = (f"T = {T:g} K：U_eq {st['U_eq']:.4f} Å²"
+         + (f" (晶体学 {st['U_eq_ref']:.4f}，比值 {st['ratio_ref']:.2f})" if st.get("U_eq_ref") else "")
+         + f"，后半段/前半段 {st['growth']:.2f}，分子质心最大偏移 {st['drift_max_A']:.2f} Å")
+    if st["stable"]:
+        return s + "：晶格稳定"
+    why = {"ratio_ref": f"U_eq 超过晶体学值的 {STAB_UEQ_RATIO:g} 倍", "growth": "U_eq 在采样段内持续增大",
+           "drift": f"分子离开晶格位置 (> {STAB_DRIFT_A:g} Å)",
+           "anharmonic": f"U_eq/T 比最低温度大 {st.get('ueq_per_T_rel', float('nan')):.1f} 倍 (简谐晶格 U_eq ∝ T)"}
+    return (s + "\n  [警告] 力场在这个温度不能维持晶体结构：" + "；".join(why[f] for f in st["flags"])
+            + "。这个温度的 σ_V 与 μ 不可用；降低温度，或校正分子间势后重算")
 
 
 def md_temperature_series(ceds, surfaces, temps, monomer=None, supercell=None, equil_ps=None, prod_ps=None, dt=None,
                           every=None, hbar_tau=0.005, hbar_taus=(), n_real=16, recenter=True, static=True,
-                          save_dir=None, on_progress=None, md=None, **md_kw):
+                          save_dir=None, on_progress=None, md=None, frame_tlt=0, ueq_ref=None, frame_stride=None,
+                          reuse_traj=True, **md_kw):
     """逐温度：全晶体刚体 MD → σ_V、τ_c → TLT μ(T)。默认设置见 DEFAULTS，随机数种子为 T 与 T+1。
-    hbar_taus: 另外再算的 ħ/τ (eV) 列表 (敏感性检验)。返回 (rows, md)。rows 与 ceds.temperature_series 格式相同，
+    hbar_taus: 另外再算的 ħ/τ (eV) 列表 (敏感性检验)。save_dir: trajectories are saved there after each temperature and,
+    with reuse_traj, loaded instead of rerunning the MD when crystal, supercell and MD settings agree (traj_meta).
+    返回 (rows, md)。rows 与 ceds.temperature_series 格式相同，
     另含 U_eq、E_lat、T_tr、T_rot、tau_c_fs、hbar_tau_md_meV、mu_tau (各 ħ/τ 的 μ)。"""
     import os
     o = dict(DEFAULTS)
@@ -419,17 +623,33 @@ def md_temperature_series(ceds, surfaces, temps, monomer=None, supercell=None, e
         T = float(T)
         if on_progress:
             on_progress(f"MD T = {T:g} K")
-        fr = run_temperature(md, T, o)
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-            md.save(os.path.join(save_dir, f"md_{T:g}K.npz"), fr)
-        res = md_couplings(ceds, md, fr, surfaces, T, recenter=recenter)
+        traj = os.path.join(save_dir, f"md_{T:g}K.npz") if save_dir else None
+        meta = traj_meta(md, T, o)
+        fr = load_trajectory(traj, md, meta) if (traj and reuse_traj) else None
+        if fr is not None:
+            if on_progress:
+                note = (" saved by an older version: supercell, lattice, frame interval and length checked; force field "
+                        "and charges assumed unchanged" if fr.get("legacy") else " same crystal, supercell and MD settings")
+                on_progress(f"MD T = {T:g} K: reusing the saved trajectory {traj} ({note.strip()}; --rerun-md to run "
+                            f"it again)")
+                if fr.get("legacy"):
+                    save_trajectory(traj, md, fr, meta)
+        else:
+            fr = run_temperature(md, T, o, report=on_progress)
+            if traj:
+                save_trajectory(traj, md, fr, meta)
+                if on_progress:
+                    on_progress(f"MD T = {T:g} K: trajectory saved to {traj}")
+        res = md_couplings(ceds, md, fr, surfaces, T, recenter=recenter, progress=on_progress)
         taus = [r[c]["tau_fs"] for r in res.values() if "hole" in r and not r.get("weak") for c in ("hole", "electron")]
         taus = [t for t in taus if np.isfinite(t)]
         tc = float(np.mean(taus)) if taus else float("nan")
         row = {"T": T, "res": res, "U_eq": md.u_eq(fr), "E_lat": float(np.mean(fr["E"]) / md.N),
                "T_tr": float(np.mean(fr["T_tr"])), "T_rot": float(np.mean(fr["T_rot"])),
-               "tau_c_fs": tc, "hbar_tau_md_meV": HBAR_MEV_FS / tc if tc == tc else float("nan"), "mu_tau": {}}
+               "tau_c_fs": tc, "hbar_tau_md_meV": HBAR_MEV_FS / tc if tc == tc else float("nan"), "mu_tau": {},
+               "stability": stability_check(md, fr, ueq_ref)}
+        if on_progress and not row["stability"]["stable"]:
+            on_progress(stability_text(T, row["stability"]))
         for c in ("hole", "electron"):
             t = ceds.tlt(res, c, T, hbar_tau, n_real=n_real)
             row[f"mu_{c}"] = float(t["mu_principal"][0])
@@ -441,6 +661,12 @@ def md_temperature_series(ceds, surfaces, temps, monomer=None, supercell=None, e
             for ht in hbar_taus:
                 tt = ceds.tlt(res, c, T, ht, n_real=n_real)
                 row["mu_tau"][f"{c}_{ht * 1000:g}"] = float(tt["mu_principal"][0])
+        if frame_tlt:                                   # Hamiltonians of the MD frames on the MD supercell (frametlt.py)
+            from .frametlt import frame_tlt as _frame_tlt
+            if on_progress:
+                on_progress(f"frame-resolved TLT T = {T:g} K")
+            row["frame_tlt"] = _frame_tlt(ceds, md, fr, surfaces, T, hbar_tau, n_real=int(frame_tlt), recenter=recenter,
+                                          stride=frame_stride, progress=on_progress)
         rows.append(row)
     return rows, md
 
@@ -469,10 +695,12 @@ def export_md_csv(ceds, rows, path):
         w = csv.writer(fh)
         w.writerow([])
         w.writerow(["T_K", "U_eq_MD_A2", "E_lat_kcal_mol", "T_tr_K", "T_rot_K", "tau_c_fs", "hbar_tau_MD_meV"]
-                   + [f"mu_{k}meV" for k in keys])
+                   + [f"mu_{k}meV" for k in keys] + ["U_eq_growth", "drift_max_A", "lattice_stable"])
         for r in rows:
+            st = r.get("stability") or {}
             w.writerow([r["T"], f"{r['U_eq']:.5f}", f"{r['E_lat']:.3f}", f"{r['T_tr']:.1f}", f"{r['T_rot']:.1f}",
-                        f"{r['tau_c_fs']:.1f}", f"{r['hbar_tau_md_meV']:.3f}"] + [f"{r['mu_tau'][k]:.4g}" for k in keys])
+                        f"{r['tau_c_fs']:.1f}", f"{r['hbar_tau_md_meV']:.3f}"] + [f"{r['mu_tau'][k]:.4g}" for k in keys]
+                       + ([f"{st['growth']:.3f}", f"{st['drift_max_A']:.3f}", int(st["stable"])] if st else ["", "", ""]))
         w.writerow([])
         w.writerow(["T_K", "group", "carrier", "tau_c_fs"] + [f"shift_{k}" for k in PARAM_KEYS])
         for r in rows:

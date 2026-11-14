@@ -397,8 +397,53 @@ class MOO:
             out[car] = float(M[0, 0]) if len(L) == 1 else float(np.sqrt((M ** 2).mean()))
         return out
 
-    def coupling_atoms(self, Xa, Xb):
-        """两分子的实验室坐标 (与单体同原子顺序) → 由刚性叠合求出相对位置后计算 J。"""
+    def _ordered(self, X, sym=None):
+        """X 的原子顺序与参考单体不同时 (例如晶体中由滑移面产生的分子) 按几何重新对应。sym: X 的元素 (默认与单体相同)。"""
+        X = np.asarray(X, float)
+        symx = np.array(sym if sym is not None else self.sym)
+        if sorted(symx.tolist()) != sorted(self.sym):
+            raise ValueError("分子组成与参考单体不同")
+        if list(symx) == self.sym:
+            R, tt = _fit(self.Y, X)
+            if np.abs(self.Y @ R.T + tt - X).max() < 0.05:
+                return X
+        from scipy.optimize import linear_sum_assignment
+        sym = np.array(self.sym)
+
+        def frame(Z):
+            Zc = Z - Z.mean(0)
+            _, V = np.linalg.eigh(Zc.T @ Zc)
+            return Zc @ V
+        FA, FB = frame(self.Y), frame(X)
+        best = None
+        for s in np.array(np.meshgrid([1, -1], [1, -1], [1, -1])).T.reshape(-1, 3):
+            Bs = FB * s
+            perm = np.zeros(len(sym), int)
+            for e in set(self.sym):
+                i, j = np.where(sym == e)[0], np.where(symx == e)[0]
+                D = np.linalg.norm(FA[i][:, None] - Bs[j][None], axis=-1)
+                r, c = linear_sum_assignment(D)
+                perm[i[r]] = j[c]
+            Xp = X[perm]
+            R, tt = _fit(self.Y, Xp)                     # 只允许纯转动：对称等价的原子对应仍给出同一 |J|
+            dev = float(np.abs(self.Y @ R.T + tt - Xp).max())
+            if best is None or dev < best[0]:
+                best = (dev, Xp)
+        dev, Xp = best
+        if dev > 0.15:
+            raise ValueError(f"分子与参考单体无法刚性叠合 (最大偏差 {dev:.2f} Å)")
+        return Xp
+
+    def coupling_atoms(self, Xa, Xb, sym_a=None, sym_b=None):
+        """两分子的实验室坐标 → 由刚性叠合求出相对位置后计算 J。原子顺序与参考单体不同时自动重新对应
+        (v1.21.2 以前要求同一原子顺序，晶体中滑移面 / 螺旋轴产生的分子原子顺序可能不同，会得到错误的 J)。"""
+        try:
+            Xa, Xb = self._ordered(Xa, sym_a), self._ordered(Xb, sym_b)
+        except ValueError:
+            # 晶体中由反演 / 镜面产生的非平面分子 (如 CF3、TIPS 取向不同) 与参考单体只能非真转动叠合，
+            # 此时改为对实际两分子做完整的二聚体 INDO/S 投影 (较慢，但不需要叠合)
+            return dimer_projection(list(sym_a or self.sym), np.asarray(Xa, float), np.asarray(Xb, float),
+                                    sym_b=list(sym_b or sym_a or self.sym))
         Ra, ta = _fit(self.Y, Xa)
         Rb, tb = _fit(self.Y, Xb)
         Rrel = Ra.T @ Rb
@@ -415,14 +460,15 @@ def _fit(Y, X):
     return R, X.mean(0) - Y.mean(0) @ R.T
 
 
-def dimer_projection(sym, Xa, Xb, degeneracy=0.0):
+def dimer_projection(sym, Xa, Xb, degeneracy=0.0, sym_b=None):
     """二聚体 INDO/S 自洽场 + 投影：J = c_Aᵀ F_dimer c_B (单体轨道来自各自的 INDO/S 计算)。"""
+    sym_b = list(sym) if sym_b is None else list(sym_b)
     A = indo_scf(sym, Xa)
-    B = indo_scf(sym, Xb)
+    B = indo_scf(sym_b, Xb)
     n1 = len(A["P"])
     P0 = np.zeros((2 * n1, 2 * n1))
     P0[:n1, :n1], P0[n1:, n1:] = A["P"], B["P"]                  # 单体密度作初始猜测
-    D = indo_scf(list(sym) + list(sym), np.vstack([Xa, Xb]), guess=P0)
+    D = indo_scf(list(sym) + sym_b, np.vstack([Xa, Xb]), guess=P0)
     na = len(A["atom"])
     out = {}
     for car in ("hole", "electron"):

@@ -116,11 +116,15 @@ def graph_from_crystal(crys, mols, j_by_group, cutoff=4.0, criterion="atom", car
 # ----------------------------------------------------------------------------------------------
 def run_kmc(graph, lam_int, T=300.0, method="marcus", lam_out=0.0, lam_out_model="constant", pekar=0.05,
             radius=5.0, hw=0.2, field=(0.0, 0.0, 0.0), carrier="hole", sigma=0.0, supercell=4, walkers=2000,
-            steps=3000, seed=1, n_record=40, burn_in=None, start="boltzmann", estimator=None, site_offsets=None):
+            steps=3000, seed=1, n_record=40, burn_in=None, start="boltzmann", estimator=None, site_offsets=None,
+            fgr=None):
     """返回扩散张量、迁移率张量、场迁移率、MSD 曲线等。field 单位 V/cm；sigma 为位点能高斯无序 (eV)；
     site_offsets 为晶胞中各位点 (子格子) 的确定位点能 (eV，载流子能量，例如极化模型给出的两套分子之差)，可与 sigma 叠加。
     有能量无序时，载流子按 Boltzmann 分布 p_i ∝ exp(−E_i/kT) 放置，并先运行 burn_in 步 (默认 steps 的 20%)
-    达到平衡后再开始统计，避免初始高能暂态使迁移率偏高。"""
+    达到平衡后再开始统计，避免初始高能暂态使迁移率偏高。
+    method="fgr"：量子核隧穿速率 (tunneling.FGRRate，全部分子内振动模式；lam_int、lam_out、hw 不再使用)。"""
+    if method == "fgr" and fgr is None:
+        raise ValueError("method='fgr' 需要 fgr (tunneling.FGRRate)")
     rng = np.random.default_rng(seed)
     q = 1.0 if carrier == "hole" else -1.0
     F = np.asarray(field, float) * 1e-8                       # V/cm → V/Å
@@ -155,7 +159,9 @@ def run_kmc(graph, lam_int, T=300.0, method="marcus", lam_out=0.0, lam_out_model
             dE = energies[sj] - energies[si] - q * F @ v
             lo = lam_out if lam_out_model == "constant" else float(lambda_out_spheres(pekar, radius, radius,
                                                                                        np.linalg.norm(v)))
-            if method == "jortner":
+            if method == "fgr":
+                w = float(fgr.rate(jv, dE))
+            elif method == "jortner":
                 w = rate_jortner(jv, lam_int, lo, dE, T, hw)
             elif method == "miller":
                 w = rate_marcus(jv, lam_int + lo, 0.0, T) * (np.exp(-dE / kt) if dE > 0 else 1.0)

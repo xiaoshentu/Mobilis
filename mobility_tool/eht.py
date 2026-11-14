@@ -274,7 +274,16 @@ def rotate_coefficients(shells, C, R):
 
 
 def _coupling_block(A, B, **kw):
-    sab = overlap_matrix(A["shells"], A["nbf"], shells_b=B["shells"], nbf_b=B["nbf"])
+    from . import _eht_fast
+    sab = None
+    if _eht_fast.HAVE_NUMBA and _eht_fast.usable(A["shells"], B["shells"]):
+        try:
+            sab = _eht_fast.overlap_block(A["shells"], A["nbf"], B["shells"], B["nbf"])
+        except Exception as exc:  # noqa: BLE001 — never let the compiled path stop a run
+            _eht_fast.HAVE_NUMBA = False
+            print(f"[warning] numba EHT kernel failed ({type(exc).__name__}: {exc}); using numpy", flush=True)
+    if sab is None:
+        sab = overlap_matrix(A["shells"], A["nbf"], shells_b=B["shells"], nbf_b=B["nbf"])
     ha = np.concatenate([[sh["hii"]] * NSPH[sh["l"]] for sh in A["shells"]])
     hb = np.concatenate([[sh["hii"]] * NSPH[sh["l"]] for sh in B["shells"]])
     K = kw.get("K", 1.75)

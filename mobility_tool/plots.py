@@ -388,3 +388,95 @@ def mobility_3d_html(path, systems, lattice=None, plane=None, title="三维各�
     from pathlib import Path as _P
     _P(path).write_text(html, encoding="utf-8")
     return path
+
+
+ACCENT = "#D08C2E"
+
+
+# ----------------------------------------------------------------------------------------------
+# 迁移率基准：耦合方法对比、角分辨公式 (Wen 原式 / 修正式) 与实验、各计算选择的误差
+# ----------------------------------------------------------------------------------------------
+def figure_coupling_parity(rows, path=None, dpi=300, methods=(("zindo", "ZINDO/MOO", "o"), ("eht_scaled", "EHT (scaled)", "s"))):
+    """rows: [{dft_h, dft_e, zindo_h, ..., eht_scaled_h, ...}] (meV) → 空穴、电子两个对数坐标的平价图 (|J|)。"""
+    cols = {"zindo": E_COLOR, "eht_scaled": H_COLOR, "eht": "#888888"}
+    with matplotlib.rc_context({**STYLE, "font.size": 11}):
+        fig = Figure(figsize=(8.4, 4.0), dpi=dpi)
+        axs = fig.subplots(1, 2)
+        for ax, (car, s, lab) in zip(axs, (("hole", "h", "(a) holes"), ("electron", "e", "(b) electrons"))):
+            x = np.array([r[f"dft_{s}"] for r in rows])
+            keep = x > 0.05
+            for key, name, mk in methods:
+                y = np.array([abs(r[f"{key}_{s}"]) for r in rows])
+                ax.loglog(x[keep], np.clip(y[keep], 1e-3, None), mk, ms=5, mfc="none", mew=1.2, color=cols.get(key, PRIMARY),
+                          label=name)
+            lo, hi = 0.05, 300
+            ax.plot([lo, hi], [lo, hi], "k-", lw=0.8)
+            for f in (0.5, 2):
+                ax.plot([lo, hi], [lo * f, hi * f], "k:", lw=0.6)
+            ax.set_xlim(lo, hi); ax.set_ylim(1e-3, hi)
+            ax.set_xlabel("|J| B3LYP/6-31G(d) (meV)")
+            ax.set_ylabel("|J| (meV)")
+            ax.set_title(lab, loc="left", fontsize=11)
+            ax.legend(frameon=False, fontsize=9, loc="upper left")
+        fig.tight_layout()
+        if path:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return fig
+
+
+def figure_angular_benchmark(cases, path=None, dpi=300, ncols=3):
+    """cases: [{label, phi (rad), mu_tensor, mu_wen, exp: {0°: μ, 90°: μ, ...} 或 exp_curve}] → 每个体系一幅
+    对数坐标的 μ(φ) 曲线 (ab 面，φ 从 a 量起)：修正式、Wen 原式与实验。"""
+    n = len(cases)
+    nr = int(np.ceil(n / ncols))
+    with matplotlib.rc_context({**STYLE, "font.size": 10}):
+        fig = Figure(figsize=(3.3 * ncols, 2.9 * nr), dpi=dpi)
+        axs = np.atleast_1d(fig.subplots(nr, ncols)).ravel()
+        for ax, c in zip(axs, cases):
+            deg = np.degrees(c["phi"])
+            ax.semilogy(deg, c["mu_tensor"], "-", color=PRIMARY, lw=1.6, label="corrected")
+            ax.semilogy(deg, c["mu_wen"], "--", color=ACCENT, lw=1.4, label="Wen")
+            if c.get("exp_curve") is not None:
+                ax.semilogy(deg, c["exp_curve"], ":", color="k", lw=1.4, label="TOF tensor")
+            for k, (ang, v) in enumerate(sorted((c.get("exp") or {}).items())):
+                ax.semilogy([ang], [v], "o", color="k", ms=5, label="TOF" if k == 0 else None)
+            ax.set_xlim(0, 180); ax.set_xticks([0, 45, 90, 135, 180])
+            ax.set_xlabel("φ from a in the ab plane (°)")
+            ax.set_ylabel("μ (cm$^2$ V$^{-1}$ s$^{-1}$)")
+            ax.set_title(c["label"], loc="left", fontsize=10)
+        for ax in axs[n:]:
+            ax.set_visible(False)
+        axs[0].legend(frameon=False, fontsize=8, loc="lower left")
+        fig.tight_layout()
+        if path:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return fig
+
+
+def figure_benchmark_errors(groups, path=None, dpi=300):
+    """groups: [(标题, [(变体名, {分量标签: log10(计算/实验)})])] → 每组一幅：各变体对每个实验分量的 log10 比值。"""
+    with matplotlib.rc_context({**STYLE, "font.size": 10}):
+        fig = Figure(figsize=(3.6 * len(groups), 4.2), dpi=dpi)
+        axs = np.atleast_1d(fig.subplots(1, len(groups), sharey=True))
+        palette = [PRIMARY, ACCENT, H_COLOR, "#888888"]
+        for ax, (title, variants) in zip(axs, groups):
+            labels = list(variants[0][1].keys())
+            x = np.arange(len(labels))
+            w = 0.8 / len(variants)
+            for k, (name, vals) in enumerate(variants):
+                y = [vals[l] for l in labels]
+                ax.bar(x + (k - (len(variants) - 1) / 2) * w, y, w, color=palette[k % 4], label=name)
+                rms = float(np.sqrt(np.mean(np.square(y))))
+                ax.text(0.98, 0.03 + 0.06 * k, f"{name}: rms {rms:.2f}", transform=ax.transAxes, ha="right", fontsize=8,
+                        color=palette[k % 4])
+            ax.axhline(0, color="k", lw=0.8)
+            for f in (np.log10(2), -np.log10(2)):
+                ax.axhline(f, color="k", lw=0.5, ls=":")
+            ax.set_xticks(x); ax.set_xticklabels(labels, rotation=90, fontsize=7.5)
+            ax.set_title(title, loc="left", fontsize=10)
+            ax.legend(frameon=False, fontsize=8, loc="upper left")
+        axs[0].set_ylabel("log$_{10}$(μ$_{calc}$ / μ$_{TOF}$)")
+        fig.tight_layout()
+        if path:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return fig

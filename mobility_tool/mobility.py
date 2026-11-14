@@ -29,8 +29,10 @@ def _pathway_j_ev(p):
     raise ValueError(f"路径 {p.get('name', '?')} 缺少 J_meV 或 J_eV")
 
 
-def compute_mobility(lam_ev, pathways, temperature=298.15, dimension=3, dg_ev=0.0):
-    """pathways: [{name, J_meV|J_eV, r (Å) 或 vector [x,y,z] (Å), count (等价近邻数, 默认 1)}]"""
+def compute_mobility(lam_ev, pathways, temperature=298.15, dimension=3, dg_ev=0.0, point_ops=None):
+    """pathways: [{name, J_meV|J_eV, r (Å) 或 vector [x,y,z] (Å), count (等价近邻数, 默认 1)}]
+    point_ops: 晶体点群的笛卡尔转动矩阵 (dimers.json 的 point_ops)。给出时张量按晶体对称性平均：
+    每个晶胞多于两个分子 (如 Z = 4 的苝、芘) 时，单个参考分子的近邻不满足晶体对称性。"""
     kt = KB_EV * temperature
     rows, k_list, r_list, m_list, vecs = [], [], [], [], []
     for p in pathways:
@@ -47,11 +49,18 @@ def compute_mobility(lam_ev, pathways, temperature=298.15, dimension=3, dg_ev=0.
     p_single = k / np.sum(m * k)           # 每个近邻的跳跃概率
     for row, pi in zip(rows, p_single):
         row["P"] = float(pi)
-    d_scalar = float(np.sum(m * r ** 2 * k * p_single) / (2 * dimension))
+    # 标量扩散系数 (无规行走)：D = (1/2n) Σ_i m_i k_i r_i²，即停留时间 τ = 1/Σk 内的均方位移 Σ P_i r_i² 除以 τ；
+    # n = 3 时等于迁移率张量的迹 / 3。
+    # Deng–Goddard 式 D = (1/2n) Σ_i m_i r_i² k_i P_i (J. Phys. Chem. B 2004, 108, 8614) 多乘了跳跃概率 P_i、
+    # 没有除以停留时间，系统偏小约有效近邻数倍 (v1.23.1 起只作为对比输出)。
+    d_scalar = float(np.sum(m * r ** 2 * k) / (2 * dimension))
+    d_dg = float(np.sum(m * r ** 2 * k * p_single) / (2 * dimension))
     out = {
         "temperature_K": temperature, "lambda_eV": lam_ev, "dimension": dimension,
         "pathways": rows,
         "D_cm2_s": d_scalar, "mobility_cm2_Vs": d_scalar / kt,
+        "D_DG_cm2_s": d_dg, "mobility_DG_cm2_Vs": d_dg / kt,
+        "scalar_formula": "D = (1/2n) Σ m k r² (random walk); DG = Deng–Goddard (1/2n) Σ m k r² P, comparison only",
     }
 
     if all(v is not None for v in vecs):
@@ -60,6 +69,11 @@ def compute_mobility(lam_ev, pathways, temperature=298.15, dimension=3, dg_ev=0.
             vc = v * ANG2CM
             tensor += 0.5 * mi * ki * np.outer(vc, vc)
         mu_t = tensor / kt
+        if point_ops:
+            from .crystal import symmetrize_tensor
+            asym = float(np.abs(mu_t - symmetrize_tensor(mu_t, point_ops)).max())
+            mu_t = symmetrize_tensor(mu_t, point_ops)
+            out["symmetrized"] = {"n_ops": len(point_ops), "max_change_cm2_Vs": asym}
         w, u = np.linalg.eigh(mu_t)
         out["mobility_tensor_cm2_Vs"] = mu_t.tolist()
         out["mobility_principal_cm2_Vs"] = w[::-1].tolist()
@@ -93,9 +107,16 @@ def angular_mobility(tensor, plane="xy", n=361):
 
 
 # ----------------------------------------------------------------------------------------------
-# 二维角分辨迁移率 (Wen, Deng, Han, PCCP 2010, 12, 9267)
-#   μ_φ = e/(2 k_B T) Σ_i r_i² W_i P_i cos²γ_i cos²(θ_i − φ)
+# 二维角分辨迁移率
+#   修正式 (默认，model="tensor")：μ_φ = e/(2 k_B T) Σ_i W_i r_i² cos²γ_i cos²(θ_i − φ)
+#     = 无规行走迁移率张量在 φ 方向的投影 n̂ᵀ μ n̂。由 D = ⟨r²⟩/(2nτ)，⟨r²⟩ = Σ P_i r_i²，1/τ = Σ_j W_j 得到：
+#     P_i 与 1/τ 成对出现，相乘后正好是 W_i。
+#   Wen 原式 (model="wen"; Wen, Deng, Han, PCCP 2010, 12, 9267)：μ_φ = e/(2 k_B T) Σ_i r_i² W_i P_i cos²γ_i cos²(θ_i − φ)
+#     保留了 P_i 而没有 1/τ：整体偏低 (约为有效近邻数分之一)，且按 W_i² 加权，压低弱路径、放大强弱路径之差。
+#     保留它是为了与文献对比。
 #   θ_i: 跳跃路径在传输平面内的投影与参考轴的夹角；γ_i: 路径与传输平面的夹角
+#   多分子晶胞中跳跃不成 ±v 对 (Z > 2 或 P2₁ 等) 时，单参考分子的修正式也只是近似，精确值用 KMC /
+#   kmc.analytic_equivalent_sites (全晶体图的均匀化解)。
 # ----------------------------------------------------------------------------------------------
 def plane_angles(vector, plane="xy"):
     """由三维跳跃矢量求 (r, θ, γ)，θ/γ 以度为单位。plane 为 'xy'/'xz'/'yz' 或 (u, v) 两个向量。"""
@@ -117,7 +138,7 @@ def plane_angles(vector, plane="xy"):
     return r, theta, gamma
 
 
-def angular_mobility_2d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV", n=361, dg_ev=0.0):
+def angular_mobility_2d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV", n=361, dg_ev=0.0, model="tensor"):
     """pathways: [{name, r (Å), theta (°), gamma (°, 默认 0), <coupling_key>: eV, count}]。
     返回 φ 网格、μ(φ)、各路径速率与概率、最大/最小迁移率等。"""
     kt = KB_EV * temperature
@@ -137,7 +158,10 @@ def angular_mobility_2d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV
     r, th, ga, w, m = map(np.array, (r, th, ga, w, m))
     prob = w / np.sum(m * w)
     phi = np.linspace(0, 2 * np.pi, n)
-    terms = (m * r ** 2 * w * prob * np.cos(ga) ** 2)[None, :] * np.cos(th[None, :] - phi[:, None]) ** 2
+    if model not in ("tensor", "wen"):
+        raise ValueError("model 应为 tensor (修正式) 或 wen (Wen 原式)")
+    weight = w * prob if model == "wen" else w
+    terms = (m * r ** 2 * weight * np.cos(ga) ** 2)[None, :] * np.cos(th[None, :] - phi[:, None]) ** 2
     mu = terms.sum(1) / (2 * kt)
     k = int(np.argmax(mu))
     return {
@@ -147,7 +171,7 @@ def angular_mobility_2d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV
         "pathways": [{"name": nm, "r_A": float(ri / ANG2CM), "theta_deg": float(np.degrees(t)),
                       "gamma_deg": float(np.degrees(g)), "W_s-1": float(wi), "P": float(pi), "count": int(mi)}
                      for nm, ri, t, g, wi, pi, mi in zip(names, r, th, ga, w, prob, m)],
-        "lambda_eV": lam_ev, "temperature_K": temperature,
+        "lambda_eV": lam_ev, "temperature_K": temperature, "model": model,
     }
 
 
@@ -157,8 +181,9 @@ def angular_mobility_2d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV
 #     M = e/(2k_BT) Σ_i m_i W_i P_i r_i r_iᵀ；n̂ 取在传输平面内时即二维角分辨迁移率 μ_φ。
 #   无规行走迁移率张量：μ = e/(k_BT) · ½ Σ_i m_i W_i r_i r_iᵀ (与 KMC 的扩散张量对应)。
 # ----------------------------------------------------------------------------------------------
-def mobility_3d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV", model="wen", dg_ev=0.0):
-    """pathways: [{name, vector [x,y,z] (Å), <coupling_key>: eV, count}]。model: "wen" 或 "tensor"。
+def mobility_3d(lam_ev, pathways, temperature=298.15, coupling_key="V_eV", model="tensor", dg_ev=0.0):
+    """pathways: [{name, vector [x,y,z] (Å), <coupling_key>: eV, count}]。model: "tensor" (修正式 / 无规行走，默认)
+    或 "wen" (Wen 原式的三维推广，仅供与文献对比)。
     返回二阶张量 M (cm² V⁻¹ s⁻¹) 及其主值、主轴、最大 / 最小方向。"""
     kt = KB_EV * temperature
     vecs, w, m, names = [], [], [], []

@@ -105,7 +105,8 @@ def collect_group_couplings(outdir, program="gaussian", xtb_exe=None, ams_info=N
     return out, errors
 
 
-def eht_couplings_for_crystal(crys, mols, cutoff=4.0, criterion="atom", ref=0, on_progress=None, dimer_result=None):
+def eht_couplings_for_crystal(crys, mols, cutoff=4.0, criterion="atom", ref=0, on_progress=None, dimer_result=None,
+                              pi=False):
     """软件内 (EHT) 计算参考分子所有二聚体组的 J。返回 (二聚体结果, {组号: {hole, electron, ...}})。
     给出 dimer_result (如按方向选择的结果) 时直接使用它，不重新搜索。"""
     from .crystal import find_dimers
@@ -115,7 +116,11 @@ def eht_couplings_for_crystal(crys, mols, cutoff=4.0, criterion="atom", ref=0, o
     out = {}
     for n, g in enumerate(res["groups"]):
         d = g["members"][0]
-        r = eht_transfer_integrals(a_atoms, [(s, *x) for s, x in d["atoms_b"]], esd=False)["results"]
+        rr = eht_transfer_integrals(a_atoms, [(s, *x) for s, x in d["atoms_b"]], esd=False, pi=pi)
+        r = rr["results"]
+        if n == 0:
+            res["pi_frontier"] = rr.get("pi_frontier")
+            res["eht_warnings"] = [w for w in rr["warnings"] if "π" in w]
         out[g["id"]] = {"hole": r["HOMO"]["J_eff_meV"], "electron": r["LUMO"]["J_eff_meV"],
                         "r_centroid": d["r_centroid"], "multiplicity": len(g["members"])}
         if on_progress:
@@ -133,7 +138,7 @@ def mobility_from_dimers(res, couplings, lam_e, lam_h, T=300.0):
         if paths:
             r = compute_mobility(lam, paths, T)
             out[car] = {"mu_max": r["mobility_principal_cm2_Vs"][0], "mu_avg": r["mobility_tensor_average_cm2_Vs"],
-                        "mu_scalar": r["mobility_cm2_Vs"], "tensor": r["mobility_tensor_cm2_Vs"]}
+                        "mu_scalar": r["mobility_cm2_Vs"], "mu_scalar_DG": r["mobility_DG_cm2_Vs"], "tensor": r["mobility_tensor_cm2_Vs"]}
     return out
 
 

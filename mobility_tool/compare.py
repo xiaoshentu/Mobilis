@@ -8,6 +8,8 @@
   kmc_marcus_dis  同上，加位点能高斯无序 σ (Boltzmann 平衡起点)
   kmc_polar       同上，位点能取极化模型 (polar)：两套独立分子的位点能差 + MD 快照的热涨落 σ_E
   kmc_mlj         Marcus–Levich–Jortner 速率 (一个有效量子模 ħω，经典部分 λ_s) 的 KMC
+  fgr_tensor      量子核隧穿速率 (费米黄金规则，重组能分解的全部模式，Shuai 等) + 无规行走严格张量 (需要 fgr)
+  kmc_fgr         同一速率的 KMC，可加能量无序 σ (需要 fgr)
   kmc_miller      Miller–Abrahams 速率的 KMC (ν0 取该对的 Marcus 零偏速率；只有 σ > 0 时与 Marcus 不同)
   gdm             Bässler 高斯无序模型的零场解析估计 μ = μ(σ=0) exp[−(2σ/3kT)²]
   kmc_field       Marcus 速率的 KMC 场迁移率 μ = <v>·F̂/|F| (类似飞行时间法)
@@ -28,6 +30,8 @@ METHOD_NAMES = {
     "kmc_marcus_dis": "Marcus KMC + 能量无序 σ",
     "kmc_polar": "Marcus KMC + 极化位点能",
     "kmc_mlj": "Marcus–Levich–Jortner KMC",
+    "fgr_tensor": "量子核隧穿 (费米黄金规则，全部振动模式) 无规行走张量",
+    "kmc_fgr": "量子核隧穿 KMC",
     "kmc_miller": "Miller–Abrahams KMC + 能量无序 σ",
     "gdm": "Bässler GDM 解析估计",
     "kmc_field": "Marcus KMC 场迁移率",
@@ -36,9 +40,10 @@ METHOD_NAMES = {
 }
 FAMILY = {"marcus_scalar": "跳跃", "marcus_tensor": "跳跃", "kmc_marcus": "跳跃", "kmc_marcus_dis": "跳跃 + 静态无序",
           "kmc_polar": "跳跃 + 静电位点能",
-          "kmc_mlj": "跳跃 (量子振动)", "kmc_miller": "跳跃 + 静态无序", "gdm": "跳跃 + 静态无序",
+          "kmc_mlj": "跳跃 (量子振动)", "fgr_tensor": "跳跃 (量子振动)", "kmc_fgr": "跳跃 (量子振动)", "kmc_miller": "跳跃 + 静态无序", "gdm": "跳跃 + 静态无序",
           "kmc_field": "跳跃", "tlt": "瞬态局域化", "band": "能带"}
-DEFAULT_METHODS = tuple(METHOD_NAMES)
+DEFAULT_METHODS = tuple(k for k in METHOD_NAMES if k not in ("fgr_tensor", "kmc_fgr"))
+FGR_METHODS = ("fgr_tensor", "kmc_fgr")
 E_HBAR = 1.0 / HBAR_EVS                  # e/ħ in 1/(V·s)
 
 
@@ -98,7 +103,8 @@ def _verdict(key, reg, mu_band=None, a_A=None):
     r = reg["ratio_2J_lam"]
     s = reg.get("sigma_kT", 0.0)
     sj = reg.get("sigmaJ_rel")
-    if key in ("marcus_scalar", "marcus_tensor", "kmc_marcus", "kmc_field", "kmc_mlj", "kmc_marcus_dis", "kmc_polar"):
+    if key in ("marcus_scalar", "marcus_tensor", "kmc_marcus", "kmc_field", "kmc_mlj", "kmc_marcus_dis", "kmc_polar",
+               "fgr_tensor", "kmc_fgr"):
         if r < 0.3:
             v, why = "适用", f"2J/λ = {r:.2f} ≪ 1，非绝热小极化子跳跃成立"
         elif r < 1.0:
@@ -109,6 +115,8 @@ def _verdict(key, reg, mu_band=None, a_A=None):
             why += "；扩散张量应与解析张量一致 (检验 KMC)"
         if key == "kmc_mlj":
             why += "；高频分子内振动按量子处理，低温下比 Marcus 可靠"
+        if key in ("fgr_tensor", "kmc_fgr"):
+            why += "；全部分子内振动按量子处理 (核隧穿)，低温下比 Marcus 与 MLJ 可靠"
         if key == "kmc_marcus_dis" and s > 0:
             why += f"；σ/kT = {s:.1f}"
         if key == "kmc_polar":
@@ -141,12 +149,13 @@ def _verdict(key, reg, mu_band=None, a_A=None):
 
 def compare_methods(graph, lam, T=300.0, carrier="hole", methods=DEFAULT_METHODS, sigma_E=0.0, sigma_J=0.3,
                     hbar_tau=0.005, mlj_hw=0.18, mlj_lam_s=None, field=1e4, walkers=400, steps=2500, supercell=4,
-                    n_real=12, lattice=None, dim=None, seed=1, extra=(), on_progress=None, polar=None):
+                    n_real=12, lattice=None, dim=None, seed=1, extra=(), on_progress=None, polar=None, fgr=None):
     """graph：kmc.graph_from_crystal / graph_from_paths / CEDS.graph 的近邻图 (J 为 eV，可带符号)；lam：重组能 (eV)。
     sigma_J：TLT 的耦合涨落，标量 = 相对值 σ_J/|J|，或 {"edges": 与 graph["edges"] 对齐的 σ (eV)}。
     mlj_lam_s：MLJ 的经典部分 λ_s (默认 0.3λ)，量子部分 λ − λ_s 由一个有效模 ħω 承担。
     extra：附加结果 [{name, mu, mu2?, family?, note?, valid?}] (例如 CEDS)。
     polar：极化模型的位点能 {"offsets": 各晶胞位点的位点能 (eV), "sigma": 热涨落 σ_E (eV)}，用于 kmc_polar。
+    fgr：tunneling.FGRRate (由 reorg-decomp 的模式文件构建)；给出时加入 fgr_tensor 与 kmc_fgr。
     无定形形貌 (graph["kind"] == "amorphous"，整个周期盒子为一个晶胞) 不计算依赖平移对称性的方法
     (标量公式、解析张量、TLT、能带)，GDM 的 μ(σ=0) 改用 KMC。
     返回 {"rows", "regime", "inputs"}。"""
@@ -215,6 +224,20 @@ def compare_methods(graph, lam, T=300.0, carrier="hole", methods=DEFAULT_METHODS
                 r = run_kmc(graph, max(lam - lam_s, 0.0), T, method="jortner", lam_out=lam_s, hw=mlj_hw, **kmc_kw)
                 add(key, r["mu_principal"][0], r["mu_principal"][1], r["mu_avg_err"] * 3,
                     note=f"ħω = {mlj_hw * 1000:g} meV，λ_s = {lam_s * 1000:.0f} meV，S = {(lam - lam_s) / mlj_hw:.2f}", t0=t0)
+            elif key in ("fgr_tensor", "kmc_fgr"):
+                if fgr is None:
+                    continue
+                note = (f"λ = {1000 * fgr.lam:.0f} meV (量子 {1000 * fgr.lam_q:.0f}，经典 {1000 * fgr.lam_cl:.0f})，"
+                        f"k/k_Marcus = {fgr.summary()['ratio_to_marcus_dG0']:.2f}")
+                if key == "fgr_tensor":
+                    if amorphous:
+                        continue
+                    from .tunneling import tensor
+                    w = np.linalg.eigvalsh(tensor(graph, fgr))[::-1]
+                    add(key, w[0], w[1], note=note, t0=t0)
+                else:
+                    r = run_kmc(graph, lam, T, method="fgr", fgr=fgr, sigma=sigma_E if periodic else 0.0, **kmc_kw)
+                    add(key, r["mu_principal"][0], r["mu_principal"][1], r["mu_avg_err"] * 3, note=note, t0=t0)
             elif key == "kmc_miller":
                 if sigma_E <= 0 or not periodic:
                     continue

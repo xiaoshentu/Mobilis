@@ -144,6 +144,31 @@ def _matched_rmsd(ref_symbols, P, symbols, xyz):
     return float(np.sqrt(tot / max(n, 1)))
 
 
+def _refine_frame(ref_symbols, ref_Y, symbols, xyz, a, c, n_iter=8):
+    """坐标系的最小二乘修正：按元素匹配重原子后做 Kabsch 拟合 (保持 det(a) 的手性)，迭代几次。
+    主惯量轴近简并的分子 (如赝 C3 的 mer-Alq3) 中，惯量主轴由结构的微小差别决定，单体 (如气相优化结构) 与晶体分子
+    的主轴可能相差几十度；只按主轴放置会使分子错位、与邻居重叠。返回 (ax, 原点, RMSD)。"""
+    from scipy.optimize import linear_sum_assignment
+    rs, sy = np.asarray(ref_symbols), np.asarray(symbols)
+    det = np.sign(np.linalg.det(a))
+    for _ in range(n_iter):
+        P = ref_Y @ a.T + c
+        ia, ib = [], []
+        for e in set(rs.tolist()):
+            if e == "H":
+                continue
+            i, j = np.where(rs == e)[0], np.where(sy == e)[0]
+            r, cc = linear_sum_assignment(np.linalg.norm(P[i][:, None] - xyz[j][None], axis=-1))
+            ia += list(i[r]); ib += list(j[cc])
+        Yr, Xc = ref_Y[ia], xyz[ib]
+        my, mx = Yr.mean(0), Xc.mean(0)
+        U, _, Vt = np.linalg.svd((Yr - my).T @ (Xc - mx))
+        d = det * np.sign(np.linalg.det(Vt.T @ U.T))
+        a = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+        c = mx - my @ a.T
+    return a, c, _matched_rmsd(ref_symbols, ref_Y @ a.T + c, symbols, xyz)
+
+
 def matched_frame(ref_symbols, ref_Y, symbols, xyz, mode="all"):
     """晶体中某个分子的分子坐标系 (ax, 原点)，使参考单体 ref_Y (已在分子坐标系中) 经 ref_Y·axᵀ + 原点 与该分子重合。
     主轴的符号约定对只有部分对称性的分子 (如 C2h 的红荧烯) 不能保证各分子一致，因此在四种保持手性的符号取法中
@@ -167,10 +192,16 @@ def matched_frame(ref_symbols, ref_Y, symbols, xyz, mode="all"):
         if bm is None or r < bm[0]:
             bm = (r, a)
     if bm[0] < 0.5 * best[0] and best[0] > 0.3:
-        return bm[1], c, bm[0]
-    if r0 <= best[0] + 0.02:
-        return ax, c, r0
-    return best[1], c, best[0]
+        out = (bm[1], c, bm[0])
+    elif r0 <= best[0] + 0.02:
+        out = (ax, c, r0)
+    else:
+        out = (best[1], c, best[0])
+    if out[2] > 0.2:                     # 主轴放置不好 (主惯量近简并或构象不同)：最小二乘修正，明显更好才采用
+        ref = _refine_frame(ref_symbols, ref_Y, symbols, xyz, out[0], out[1])
+        if ref[2] < 0.8 * out[2]:
+            return ref
+    return out
 
 
 def rot(axis, deg):
@@ -741,7 +772,7 @@ def write_adf_scan(outdir, symbols, Y, configs, frag="mono", basis="TZP", xc="PW
     (outdir / "outputs").mkdir(parents=True, exist_ok=True)
     (outdir / "xyz").mkdir(exist_ok=True)
     root = outdir.resolve().as_posix()
-    kw = (f"SYMMETRY NOSYM\n\nBASIS\ntype {basis}\ncore None\ncreateoutput None\nEND\n\n"
+    kw = (f"SYMMETRY NOSYM tol=0.1\n\nBASIS\ntype {basis}\ncore None\ncreateoutput None\nEND\n\n"
           f"XC\nGGA {xc}\nEND\n\n")
     if mono_t21:
         import shutil
