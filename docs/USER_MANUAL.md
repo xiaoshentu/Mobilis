@@ -1,6 +1,6 @@
 # Mobilis user manual
 
-Mobilis 1.25.0 (developer: Yarui Shi, Anyang Normal University (Anyang Normal University))
+Mobilis 1.31.0 (developer: Yarui Shi, Anyang Normal University)
 
 Mobilis computes charge-carrier mobilities of organic semiconductors from a crystal structure (CIF) or an MD
 morphology. It prepares and reads Gaussian and ADF calculations, contains its own extended-Hückel (EHT), ZINDO/MOO and
@@ -74,12 +74,12 @@ results of the program paper and compares them with stored output.
 
 ```text
 usage: mobility_tool [-h] [--version]
-                     {reorg-gen,reorg-analyze,ti-gen,ti-calc,mobility,reorg-decomp,adf-gen,adf-read,crystal,ipea,orbitals,fcht-gen,fcht-read,mobility2d,mobility3d,excited-gen,excited-read,rmsd,orbcomp,run,eht-ti,compare-ti,kmc,strain-scan,tlt,vibronic,kmc-validate,scan,ceds,polar,morph,zindo,cif2gro,gui} ...
+                     {reorg-gen,reorg-analyze,ti-gen,ti-calc,mobility,reorg-decomp,adf-gen,adf-read,crystal,ipea,orbitals,fcht-gen,fcht-read,mobility2d,mobility3d,excited-gen,excited-read,rmsd,orbcomp,run,eht-ti,compare-ti,kmc,strain-scan,db,photocond,diagnose,tlt,vibronic,kmc-validate,scan,ceds,polar,morph,zindo,cif2gro,gui} ...
 
 Mobilis — charge transport and photophysics of organic semiconductors
 
 positional arguments:
-  {reorg-gen,reorg-analyze,ti-gen,ti-calc,mobility,reorg-decomp,adf-gen,adf-read,crystal,ipea,orbitals,fcht-gen,fcht-read,mobility2d,mobility3d,excited-gen,excited-read,rmsd,orbcomp,run,eht-ti,compare-ti,kmc,strain-scan,tlt,vibronic,kmc-validate,scan,ceds,polar,morph,zindo,cif2gro,gui}
+  {reorg-gen,reorg-analyze,ti-gen,ti-calc,mobility,reorg-decomp,adf-gen,adf-read,crystal,ipea,orbitals,fcht-gen,fcht-read,mobility2d,mobility3d,excited-gen,excited-read,rmsd,orbcomp,run,eht-ti,compare-ti,kmc,strain-scan,db,photocond,diagnose,tlt,vibronic,kmc-validate,scan,ceds,polar,morph,zindo,cif2gro,gui}
     reorg-gen           Generate Gaussian inputs for four-point reorganization energies
     reorg-analyze       Read Gaussian outputs and compute the reorganization energy
     ti-gen              Generate Gaussian inputs for transfer integrals (A, B, AB)
@@ -106,6 +106,12 @@ positional arguments:
     compare-ti          Compare transfer integrals from EHT / Gaussian / ADF
     kmc                 CIF → EHT transfer integrals → crystal-graph KMC (VOTCA style)
     strain-scan         Cell scaling (strain) scan: EHT transfer integrals → mobility
+    db                  Coupling-surface database: store the DFT dimers and transport results of a crystal
+                        (add), list the records (list), merge all dimers into one table (export)
+    photocond           Photoconductivity under illumination: exciton generation, Onsager–Braun free-carrier
+                        yield, Langevin/trap recombination, steady Δσ or pulse decay
+    diagnose            Transport regime from a CIF: 2|J|/λ, phonon σ_J/|J|, interlayer coupling, π frontier
+                        orbitals -> recommended model and command (a few seconds)
     tlt                 CIF → EHT transfer integrals → transient-localization (TLT) mobility and effective
                         mass
     vibronic            Vibronically resolved phosphorescence spectrum and energy-gap law from FCHT Huang-
@@ -752,6 +758,15 @@ options:
 
 ### ceds
 
+Frame-resolved TLT (`ceds md --frame-tlt`). The MD supercell is used as the TLT lattice: every in-plane bond of every
+frame gets its coupling from the surface of its pair. Example:
+`python -m mobility_tool ceds md --cif rubrene.cif --project proj --al-surfaces al --temps 300 --supercell 1,12,12 --frame-tlt 24 --out rubrene_frames.csv`.
+The report compares three sets of Hamiltonians on the same lattice: independent Gaussian draws N(⟨V⟩, σ_V) per bond
+(standard TLT), independent draws from the MD distribution of each bond type (“MD marginals”) and the couplings of the
+MD frames. “shape” is marginals against Gaussian, “correlation” is frames against marginals; ± is the jackknife standard
+error over the frames. The transport plane is chosen from the couplings at the crystal geometry and printed before the
+MD starts; the supercell needs at least 8 cells along both of its directions.
+
 ```text
 usage: mobility_tool ceds [-h] --cif CIF [--project PROJECT] [--monomer MONOMER] [--frame {all,core}]
                           [--name NAME] [--level LEVEL] [--source {project,eht}] [--eht-fallback]
@@ -761,13 +776,14 @@ usage: mobility_tool ceds [-h] --cif CIF [--project PROJECT] [--monomer MONOMER]
                           [--gphi-csv [GPHI_CSV ...]] [--local-csv [LOCAL_CSV ...]] [--sigma-only]
                           [--pairs PAIRS] [--out OUT] [--supercell SUPERCELL] [--md-charges MD_CHARGES]
                           [--md-equil MD_EQUIL] [--md-prod MD_PROD] [--md-dt MD_DT] [--md-every MD_EVERY]
-                          [--md-rc MD_RC] [--htau-list HTAU_LIST] [--raw-geometry] [--save-traj SAVE_TRAJ]
-                          [--traj TRAJ] [--n-snap N_SNAP] [--md-half] [--md-k MD_K] [--ph-quantum]
-                          [--ph-htau-auto] [--ph-gamma] [--ph-real PH_REAL] [--ph-external PH_EXTERNAL]
-                          [--ph-structure PH_STRUCTURE] [--ph-length-unit {auto,angstrom,bohr}]
-                          [--ph-phase {positions,cell}] [--al-init AL_INIT] [--al-abs AL_ABS]
-                          [--al-seed AL_SEED] [--al-batch AL_BATCH] [--al-target AL_TARGET]
-                          [--al-pool AL_POOL] [--al-delta {auto,on,off}] [--al-goal {auto,sigma,mu}]
+                          [--md-rc MD_RC] [--htau-list HTAU_LIST] [--raw-geometry] [--frame-tlt [N_FRAMES]]
+                          [--save-traj SAVE_TRAJ] [--traj TRAJ] [--n-snap N_SNAP] [--md-half] [--md-k MD_K]
+                          [--ph-quantum] [--ph-htau-auto] [--ph-gamma] [--ph-real PH_REAL]
+                          [--ph-external PH_EXTERNAL] [--ph-structure PH_STRUCTURE]
+                          [--ph-length-unit {auto,angstrom,bohr}] [--ph-phase {positions,cell}]
+                          [--al-init AL_INIT] [--al-abs AL_ABS] [--al-seed AL_SEED] [--al-batch AL_BATCH]
+                          [--al-target AL_TARGET] [--al-pool AL_POOL] [--al-delta {auto,on,off}]
+                          [--al-goal {auto,sigma,mu}] [--al-calib {auto,fixed,loo}]
                           [--al-mu-target AL_MU_TARGET] [--al-budget [N_BOOT]]
                           [--al-budget-sigma-e AL_BUDGET_SIGMA_E] [--al-mu-draws AL_MU_DRAWS]
                           [--al-surfaces AL_SURFACES] [--force]
@@ -836,6 +852,12 @@ md (full-crystal rigid-body MD):
                         Also compute μ for these ħ/τ (meV), e.g. "2,10"
   --raw-geometry        Do not shift the mean structure back to the experimental one (use the force-field
                         mean structure)
+  --frame-tlt [N_FRAMES]
+                        md: TLT with the Hamiltonians of N_FRAMES MD frames on the MD supercell (default
+                        24), compared with independent Gaussian draws and with independent draws from the MD
+                        distributions on the same lattice. Needs a supercell of at least 8 cells along the
+                        two transport directions, e.g. --supercell 12,12,2 (each layer of the supercell is
+                        one TLT lattice)
   --save-traj SAVE_TRAJ
                         Folder for the trajectory of each temperature (npz)
   --traj TRAJ           snapshots: use a saved trajectory (npz) instead of running MD
@@ -879,6 +901,11 @@ al (active-learning coupling surfaces):
                         Target of point selection and stopping: sigma = σ_V interval of each pair (default);
                         mu = interval of the TLT mobility, selecting points over all pairs by the posterior
                         variance of μ (v1.21). Existing tasks keep their setting; switch with sigma / mu
+  --al-calib {auto,fixed,loo}
+                        Calibration of the posterior intervals: fixed = fixed factor c = 2.0 (default, set
+                        on pentacene); loo = c of each pair from the standardized leave-one-out residuals of
+                        its DFT points. Both modes list c_LOO in the report. Existing tasks keep their
+                        setting
   --al-mu-target AL_MU_TARGET
                         Stopping criterion of --al-goal mu: relative 95% half-width of μ (default 0.01)
   --al-budget [N_BOOT]  al: error budget of the mobility (surface posterior, thermal samples, TLT
@@ -894,6 +921,93 @@ al (active-learning coupling surfaces):
                         run / md: use the GP surfaces fitted by this active-learning task (overrides other
                         sources)
   --force               al: continue even if the previous round has unfinished configurations
+```
+
+### db
+
+Coupling-surface database. `db add <db> <name> --project <scan project>` stores the finished DFT dimers of a crystal;
+`--cif`, `--ccdc`, `--al`, `--lambda`, `--md-csv` and `--validation` add the structure, the active-learning summary, the
+reorganization energies, the MD results and the snapshot validation to `record.json`. A record is replaced with
+`--overwrite`. `db list <db>` prints one line per crystal; `db export <db>` writes all dimers of all crystals to
+`<db>/all_dimers.csv` (column `crystal` first) and a summary table.
+
+```text
+usage: mobility_tool db [-h] [--project PROJECT] [--cif CIF] [--no-cif] [--ccdc CCDC] [--al AL]
+                        [--lambda REORG] [--md-csv MD_CSV] [--validation VALIDATION] [--note NOTE]
+                        [--overwrite] [--out OUT]
+                        {add,list,export} db [key]
+
+positional arguments:
+  {add,list,export}     Action
+  db                    Database folder
+  key                   add: record name of the crystal, e.g. rubrene_605654
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT     add: scan project of the crystal (folder with project.json)
+  --cif CIF             add: crystal structure (cell and space group are stored; the file is copied)
+  --no-cif              add: do not copy the CIF (structures that may not be redistributed)
+  --ccdc CCDC           add: CCDC / COD deposition number
+  --al AL               add: name of the active-learning task (ceds al --name)
+  --lambda REORG        add: reorganization-energy result (<name>_lambda.json)
+  --md-csv MD_CSV       add: result csv of ceds md (pair statistics, mobility against temperature)
+  --validation VALIDATION
+                        add: result csv of ceds validate (surfaces against direct snapshots)
+  --note NOTE           add: free text stored in the record
+  --overwrite           add: replace an existing record of the same name
+  --out OUT             export: output csv (default <db>/all_dimers.csv)
+```
+
+### photocond
+
+Photoconductivity under illumination. The chain is: exciton generation g = Φ(1 − R)(1 − e^(−αd))/d; free-carrier
+yield η = k_d/(k_d + 1/τ_S) with the Braun dissociation rate k_d = 3k_L/(4πa³)·exp(−E_b/kT)·I₁(2√(2b))/√(2b),
+b = e³F/(8πε₀ε_r k²T²) and a = e²/(4πε₀ε_r E_b); Langevin recombination k_L = e(μe + μh)/(ε₀ε_r) (times `--zeta`),
+with optional trap recombination: ηg = k_r n² + n/τ_t; Δσ = e n (μe + μh). The mobilities are the ground-state
+(polaron) mobilities, because photogenerated carriers relax within picoseconds. Example (pentacene, 300 K):
+`python -m mobility_tool photocond --md-csv pentacene_md.csv --temp 300 --eps 4.3 --eb 0.5 --tau-s 0.08 --wavelength 670 --alpha 1e5 --thickness 50 --refl 0.1 --intensity "0.01 0.1 1" --field 1e5 --fluence 1 --out pc.csv`.
+The yield depends exponentially on E_b; give E_b from band-edge gaps (or GW-BSE), not from the site-energy gap of `polar`.
+
+```text
+usage: mobility_tool photocond [-h] [--md-csv MD_CSV] [--mu-e MU_E] [--mu-h MU_H] --eps EPS [--eb EB]
+                               [--et ET] [--eopt EOPT] [--tau-s TAU_S] --wavelength WAVELENGTH --alpha ALPHA
+                               [--thickness THICKNESS] [--refl REFL] [--intensity INTENSITY] [--field FIELD]
+                               [--temp TEMP] [--fluence FLUENCE] [--zeta ZETA] [--tau-trap TAU_TRAP]
+                               [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --out OUT             result csv
+
+transport (from ceds md or given):
+  --md-csv MD_CSV       result csv of ceds md: μe, μh at --temp
+  --mu-e MU_E           electron mobility / cm² V⁻¹ s⁻¹
+  --mu-h MU_H           hole mobility / cm² V⁻¹ s⁻¹
+  --eps EPS             relative permittivity (polar: Lorentz–Lorenz)
+
+excitons:
+  --eb EB               exciton binding energy / eV
+  --et ET               solid-state transport gap / eV (band edges)
+  --eopt EOPT           optical gap / eV (E_b = E_t − E_opt)
+  --tau-s TAU_S         singlet-exciton lifetime / ps (fission, radiative and non-radiative decay; default
+                        1000)
+
+sample and illumination:
+  --wavelength WAVELENGTH
+                        excitation wavelength / nm
+  --alpha ALPHA         absorption coefficient at the wavelength / cm⁻¹
+  --thickness THICKNESS
+                        film thickness / nm
+  --refl REFL           reflectance
+  --intensity INTENSITY
+                        intensity / W cm⁻², one or several values
+  --field FIELD         electric field / V cm⁻¹, one or several values
+  --temp TEMP           temperature / K
+  --fluence FLUENCE     pulse energy density / μJ cm⁻² (adds the decay of Δσ after a pulse)
+
+recombination:
+  --zeta ZETA           reduction factor of Langevin recombination
+  --tau-trap TAU_TRAP   trap-assisted (monomolecular) lifetime / ns
 ```
 
 ### scan
@@ -924,6 +1038,22 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
 ```
+
+**ORCA and xtb levels (1.29.0).** Besides ADF, a level can be computed with ORCA or xtb:
+
+```text
+python -m mobility_tool scan level proj --engine orca --method "B3LYP D3BJ" --qc-basis def2-SVP --nprocs 8
+python -m mobility_tool scan level proj --engine xtb --gfn 1
+```
+
+Run `monomer/<level>/run_mono.sh` (Windows: `run_mono.bat`) once: it computes monomer A and writes
+`mono.molden.input`, the phase reference of every dimer of the level. The batch files of a scan then compute B and AB
+for each dimer (`outputs/<id>/`). The coupling is obtained by the dimer projection on the Molden files, with the
+orbital signs of B aligned to the reference monomer, so V keeps its sign over the scan and can be fitted by the coupling
+surfaces and the active-learning loop exactly like ADF data. Set `ORCA_EXE` (full path, needed for parallel ORCA) or
+`XTB_EXE` if the programs are not on PATH. Use a basis without diffuse functions: the projection needs all basis
+functions (`%scf Sthresh 1e-8 end` is written into the ORCA input). The column `phase_B_hole` / `phase_B_electron` of
+the results shows how well B's orbital matches the moved reference orbital (±1 for a rigid copy).
 
 ### excited-gen
 
@@ -977,6 +1107,219 @@ options:
   --ev EV      Vertical emission energy / eV
   --temp TEMP  Temperature / K of the vibronic spectrum
   --fwhm FWHM  Line width (FWHM) / eV
+```
+
+### tunneling
+
+Hopping rate with quantum nuclear tunneling (Fermi golden rule over the Huang–Rhys factors of all intramolecular
+modes of both charge states; Nan et al., Phys. Rev. B 79, 115203 (2009)). Input: the two mode files of `reorg-decomp`.
+Prints λ (quantum / classical), k_FGR/k_Marcus and k_MLJ/k_Marcus at ΔG = 0 for each temperature; with `--cif` also
+the zero-field mobility from FGR and from Marcus with the same λ (EHT couplings), and with `--kmc` a KMC check.
+The same rates are available in `kmc --rate fgr --modes …`. Limits checked in `tests/test_v51.py`: all modes
+classical → Marcus, one high-frequency mode → Marcus–Levich–Jortner.
+
+```
+python -m mobility_tool tunneling --modes pen_neutral_modes.csv pen_ion_modes.csv --cif pentacene.cif --temps 100,200,300 --out fgr.csv
+```
+
+```
+usage: mobility_tool tunneling [-h] --modes MODES [MODES ...] [--temps TEMPS]
+                               [--lam-out LAM_OUT]
+                               [--classical-below CLASSICAL_BELOW] [--cif CIF]
+                               [--carrier {hole,electron}] [--cutoff CUTOFF]
+                               [--kmc] [--sigma SIGMA] [--pi] [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --modes MODES [MODES ...]
+                        mode files of reorg-decomp: <prefix>_neutral_modes.csv
+                        and <prefix>_ion_modes.csv
+  --temps TEMPS         temperatures / K, e.g. 100,200,300
+  --lam-out LAM_OUT     classical (outer-sphere) reorganization energy / eV
+  --classical-below CLASSICAL_BELOW
+                        treat modes below this frequency / cm⁻¹ classically
+                        (default 0: all quantum)
+  --cif CIF             crystal: mobility tensor with EHT couplings (FGR and
+                        Marcus, same λ)
+  --carrier {hole,electron}
+                        Charge carrier
+  --cutoff CUTOFF       Neighbour criterion: shortest atom-atom distance / Å
+                        (default 4.0)
+  --kmc                 --cif: also run KMC with the FGR rates (checks the
+                        tensor)
+  --sigma SIGMA         --kmc: Gaussian site-energy disorder / eV
+  --pi                  use the highest occupied / lowest unoccupied π
+                        orbitals
+  --out OUT             write the table to this csv file
+```
+
+### tvcf
+
+Excited-state decay rates from thermal vibration correlation functions (harmonic potentials with frequency changes
+and Duschinsky rotation; Peng et al., J. Chem. Phys. 126, 114302 (2007); Niu et al., J. Phys. Chem. A 114, 7817
+(2010)). The two states come from freq fchk files (same atoms, same order); give at least one coupling:
+`--mu` / `--fosc` (radiative rate and emission spectrum, `--ht-dipole` adds Herzberg–Teller), `--nac` (internal
+conversion from the Cartesian non-adiabatic coupling vector at the initial geometry) or `--soc` (intersystem
+crossing, `--ht-soc` adds the spin-vibronic part, `--triplet-initial` for T → S). Writes `<out>_rates.csv` and
+`<out>_spectrum.csv`. Tutorial: docs/tutorials/04.
+
+```
+python -m mobility_tool tvcf --initial S1.fchk --final S0.fchk --fosc 0.05 --nac nac.txt --temps 77,300 --out S1S0
+```
+
+```
+usage: mobility_tool tvcf [-h] [--initial INITIAL] [--final FINAL] [--modes MODES] [--de DE] [--temps TEMPS]
+                          [--mu MU] [--mu-debye] [--fosc FOSC] [--e-vert E_VERT] [--ht-dipole HT_DIPOLE]
+                          [--nac NAC] [--nac-modes NAC_MODES] [--soc SOC] [--ht-soc HT_SOC]
+                          [--triplet-initial] [--n-refr N_REFR] [--floor-cm FLOOR_CM]
+                          [--damping-fs DAMPING_FS] [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --initial INITIAL     freq fchk of the initial state (e.g. S1 or T1)
+  --final FINAL         freq fchk of the final state (e.g. S0, or T1 for ISC)
+  --modes MODES         instead of fchk files: table of frequencies and Huang–Rhys factors (displaced
+                        oscillators, same frequencies in both states)
+  --de DE               adiabatic energy gap E_initial − E_final / eV (default: from the fchk total
+                        energies)
+  --temps TEMPS         temperatures / K, e.g. 77,300
+  --mu MU               transition dipole (a.u., e·a0): |μ| or μx,μy,μz → radiative rate
+  --mu-debye            --mu (and --mu-s1 / --mu-t1) are in debye
+  --fosc FOSC           oscillator strength instead of --mu (with --e-vert)
+  --e-vert E_VERT       vertical energy / eV belonging to --fosc (default: --de)
+  --ht-dipole HT_DIPOLE
+                        Herzberg–Teller: table 'mode, dμx, dμy, dμz' (a.u. per √amu·a0, initial-state normal
+                        modes in increasing frequency)
+  --nac NAC             non-adiabatic coupling ⟨Φ_f|∂Φ_i/∂R⟩ at the initial geometry, one row per atom
+                        (bohr⁻¹; ORCA output or any table) → internal conversion
+  --nac-modes NAC_MODES
+                        non-adiabatic coupling per initial-state mode, table 'mode, value' (a.u. per
+                        √amu·a0)
+  --soc SOC             spin–orbit coupling / cm⁻¹ (root of the sum of |⟨S|H_SO|T_m⟩|² over the triplet
+                        sublevels) → intersystem crossing
+  --ht-soc HT_SOC       spin-vibronic (HT) part of the SOC: table 'mode, dSOC' (cm⁻¹ per √amu·a0)
+  --triplet-initial     the initial state is the triplet (T → S): average over its three sublevels (factor
+                        1/3)
+  --n-refr N_REFR       refractive index of the medium (k_r ∝ n²)
+  --floor-cm FLOOR_CM   raise frequencies below this value / cm⁻¹ to it
+  --damping-fs DAMPING_FS
+                        Gaussian damping time / fs (Gaussian broadening σ ≈ 0.93 eV·fs / τ)
+  --out OUT             prefix of the output files (<prefix>_rates.csv, <prefix>_spectrum.csv)
+```
+
+### tadf
+
+S1/T1 kinetics of an emitter from the freq fchk files of S0, S1 and T1: k_r and k_IC (S1 → S0), k_ISC (S1 → T1),
+k_RISC (T1 → S1, averaged over the triplet sublevels), the T1 decay (`--soc-t1s0`, `--mu-t1`), then the rate
+equations: prompt and delayed lifetimes and quantum yields.
+
+```
+python -m mobility_tool tadf --s0 S0.fchk --s1 S1.fchk --t1 T1.fchk --fosc 0.02 --soc 0.8 --out tadf.json
+```
+
+```
+usage: mobility_tool tadf [-h] --s0 S0 --s1 S1 --t1 T1 [--e-s1 E_S1] [--e-t1 E_T1] [--fosc FOSC]
+                          [--e-vert E_VERT] [--mu-s1 MU_S1] [--mu-t1 MU_T1] [--mu-debye] --soc SOC
+                          [--soc-t1s0 SOC_T1S0] [--nac NAC] [--temps TEMPS] [--n-refr N_REFR]
+                          [--floor-cm FLOOR_CM] [--damping-fs DAMPING_FS] [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --s0 S0               freq fchk of S0
+  --s1 S1               freq fchk of S1 (TD-DFT opt + freq)
+  --t1 T1               freq fchk of T1
+  --e-s1 E_S1           adiabatic S1 energy above S0 / eV (default: from the fchk files)
+  --e-t1 E_T1           adiabatic T1 energy above S0 / eV (default: from the fchk files)
+  --fosc FOSC           S1 → S0 oscillator strength
+  --e-vert E_VERT       vertical S1 energy / eV belonging to --fosc (default: --e-s1)
+  --mu-s1 MU_S1         instead of --fosc: |μ(S1→S0)| / a.u.
+  --mu-t1 MU_T1         |μ(T1→S0)| / a.u. from SOC-TDDFT → phosphorescence rate
+  --mu-debye            --mu-s1 / --mu-t1 are in debye
+  --soc SOC             S1–T1 spin–orbit coupling / cm⁻¹
+  --soc-t1s0 SOC_T1S0   T1–S0 spin–orbit coupling / cm⁻¹ → non-radiative T1 decay
+  --nac NAC             S1–S0 non-adiabatic coupling at the S1 geometry (bohr⁻¹, one row per atom) →
+                        internal conversion
+  --temps TEMPS         Temperatures / K, e.g. 100,150,200,250,300
+  --n-refr N_REFR       refractive index of the medium (k_r ∝ n²)
+  --floor-cm FLOOR_CM   raise frequencies below this value / cm⁻¹ to it
+  --damping-fs DAMPING_FS
+                        Gaussian damping time / fs
+  --out OUT             write the results to this JSON file
+```
+
+### dp-gen / dp
+
+Deformation-potential band mobility (Bardeen & Shockley, Phys. Rev. 80, 72 (1950)). `dp-gen` writes homogeneously
+strained cells for periodic DFT and the strain table; fill in the total energies and the band edges (referenced to
+the vacuum level or a core level) and run `dp`, which fits C and E₁ per axis and gives the Bardeen–Shockley
+mobility (`--mass`, or the tight-binding mass along the axis with `--cif`) and Boltzmann transport on the
+tight-binding band with the DP relaxation time. Tutorial: docs/tutorials/05.
+
+```
+python -m mobility_tool dp-gen pentacene.cif --strains=-1,-0.5,0,0.5,1 --axes a,b --format poscar
+python -m mobility_tool dp pentacene_dp_strain_table.csv --cif pentacene.cif --mass 1.5 --out dp.csv
+```
+
+```
+usage: mobility_tool dp-gen [-h] [--strains STRAINS] [--axes AXES] [--format {cif,poscar}] [--out OUT] cif
+
+positional arguments:
+  cif                   Crystal structure (CIF)
+
+options:
+  -h, --help            show this help message and exit
+  --strains STRAINS     strains / %, written as --strains=-1,-0.5,0,0.5,1
+  --axes AXES           lattice vectors to strain, e.g. a,b
+  --format {cif,poscar}
+  --out OUT             prefix of the written files
+```
+
+```
+usage: mobility_tool dp [-h] [--dim {2,3}] [--size SIZE] [--mass MASS] [--cif CIF] [--cutoff CUTOFF] [--pi]
+                        [--kgrid KGRID] [--temp TEMP] [--out OUT]
+                        table
+
+positional arguments:
+  table            strain table: axis, strain, energy_eV, vbm_eV, cbm_eV, volume_A3 (2D: area_A2)
+
+options:
+  -h, --help       show this help message and exit
+  --dim {2,3}      3: bulk crystal (C in GPa); 2: monolayer (C in N/m)
+  --size SIZE      volume / Å³ (2D: area / Å²) of the unstrained cell, if not in the table
+  --mass MASS      effective mass(es) / m_e for Bardeen–Shockley, one value or one per axis of the table
+  --cif CIF        crystal: tight-binding band from EHT couplings → effective masses and Boltzmann transport
+  --cutoff CUTOFF  Neighbour criterion: shortest atom-atom distance / Å (default 4.0)
+  --pi             use the highest occupied / lowest unoccupied π orbitals
+  --kgrid KGRID    k points per periodic direction for Boltzmann transport
+  --temp TEMP      Temperature / K
+  --out OUT        write the results to this csv file
+```
+
+### project
+
+Project files (`*.mobilis.json`) keep the variables, the calculation steps and the GUI settings of a study.
+`project new` (templates `crystal`, `emitter`, `deformation`), `project check`, `project show`, `project run`
+(`--only`, `--start`, `--set NAME=VALUE`, `--keep-going`; output in `logs/<step>.log`, status in
+`<project>.status.json`). In the GUI: File → Save project / Open project. Tutorial: docs/tutorials/06.
+
+```
+usage: mobility_tool project [-h] [--template {crystal,emitter,deformation}] [--set NAME=VALUE]
+                             [--only ONLY] [--start START] [--keep-going]
+                             {new,show,check,run} file
+
+positional arguments:
+  {new,show,check,run}  Action
+  file                  project file, e.g. pentacene.mobilis.json
+
+options:
+  -h, --help            show this help message and exit
+  --template {crystal,emitter,deformation}
+                        new: crystal (transport with EHT couplings), emitter (TVCF S1/T1 kinetics) or
+                        deformation (deformation-potential band mobility)
+  --set NAME=VALUE      new / run: set a variable of the project, e.g. --set cif=pentacene.cif
+  --only ONLY           run: only these steps (comma-separated names)
+  --start START         run: start from this step
+  --keep-going          run: continue after a failed step
 ```
 
 ### rmsd
