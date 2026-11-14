@@ -56,6 +56,18 @@ def test_ceds_al_loop():
     sel = [i for r in run.state["rounds"] for idx in r["selected"].values() for i in idx]
     n_total = len(sel)
     assert n_total <= 2 * (8 + 8 * 8)
+    # report-only calibration check: c_LOO and σ_V half widths for c = 1.5/2.0/2.5/c_LOO; state unchanged
+    n_rounds = len(run.state["rounds"])
+    outc = cli(*common, "--al-calib-report")
+    assert "区间校准检查" in outc and "c_LOO" in outc and "只做了报告" in outc, outc[-1500:]
+    assert len(ALRun(ScanProject(proj_dir), "al1").state["rounds"]) == n_rounds
+    assert os.path.exists(os.path.join(str(run.dir), "al1_calib_report.json"))
+    try:                                                     # wrong name: refuses, does not start a new task
+        cli(*[x if x != "al1" else "al_missing" for x in common], "--al-calib-report")
+        raise AssertionError("should refuse")
+    except AssertionError as e:
+        assert "只用于已有的任务" in str(e)
+    assert not ALRun(ScanProject(proj_dir), "al_missing").exists
     # 种子：用 al1 各轮已算完的数据启动新的主动学习任务 (换一段 MD 的候选池) → 应直接收敛或只需少量补点
     seeds = ",".join(r["scan"] for r in run.state["rounds"])
     c2 = [x if x != "al1" else "al2" for x in common] + ["--al-seed", seeds]

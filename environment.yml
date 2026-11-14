@@ -1,0 +1,15 @@
+# conda env create -f environment.yml   →   conda activate mobilis   →   mobilis --version / mobilis-gui
+name: mobilis
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - numpy>=1.20
+  - scipy>=1.7
+  - matplotlib>=3.5
+  - scikit-image>=0.19
+  - tk
+  - numba>=0.57          # optional: faster EHT baseline
+  - pip
+  - pip:
+      - -e .

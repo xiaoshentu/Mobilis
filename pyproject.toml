@@ -12,11 +12,28 @@ authors = [{name = "Yarui Shi"}]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.20", "scipy>=1.7", "matplotlib>=3.5", "scikit-image>=0.19"]
 
+keywords = ["organic semiconductors", "charge transport", "transfer integrals", "Marcus theory", "kinetic Monte Carlo",
+            "transient localization", "TVCF", "TADF", "deformation potential"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
 [project.optional-dependencies]
+fast = ["numba>=0.57"]
 adf = ["plams"]
+md = ["MDAnalysis>=2.0"]
+all = ["numba>=0.57", "MDAnalysis>=2.0"]
 
 [project.scripts]
 mobilis = "mobility_tool.cli:main"
+
+[project.gui-scripts]
+mobilis-gui = "mobility_tool.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/xiaoshentu/Mobilis"
@@ -28,4 +45,4 @@ packages = ["mobility_tool"]
 version = {attr = "mobility_tool.__version__"}
 
 [tool.setuptools.package-data]
-mobility_tool = ["assets/*"]
+mobility_tool = ["assets/*", "*.npz"]

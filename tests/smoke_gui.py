@@ -759,6 +759,31 @@ cp.src.set(cp.SRC[2]); cp.sig_e.set("30"); cp.run()
 assert any(r_["key"] == "kmc_polar" and r_["mu"] > 0 for r_ in cp.result["hole"]["rows"])
 check("极化位点能：晶体 P±、固态 IE/EA、MD 快照 σ_E、导出，送到方法对比页 (Marcus KMC + 极化位点能)")
 
+# ---- 光电导页
+app.show_page("光电导"); pc = app.pc_tab
+from mobility_tool import photocond as _PC
+(tmp / "md_mu.csv").write_text("T_K,group,carrier,V_mean_meV,sigma_meV\n300,1,hole,30,10\n\n"
+                               "T_K,mu_hole,mu_electron\n250,7.5,18.0\n300,6.67,16.32\n", encoding="utf-8")
+pc.md_csv.set(tmp / "md_mu.csv"); pc.temp.set("300"); pc.mu_from_csv()
+assert pc.mu_e.get() == "16.32" and pc.mu_h.get() == "6.67"
+pc.eps_from_polar(); assert abs(float(pc.eps.get()) - pt.res["eps_LL"]) < 0.01
+pc.eps.set("4.3"); pc.eb.set("0.5"); pc.tau_s.set("0.08"); pc.wl.set("670"); pc.alpha.set("1e5"); pc.thick.set("50")
+pc.refl.set("0.1"); pc.inten.set("0.01 0.1 1"); pc.field_.set("1e5 1e6"); pc.fluence.set("1"); pc.run()
+ref_ = _PC.steady_state(intensity=0.1, field=1e5, wavelength=670, alpha=1e5, thickness=50, refl=0.1, T=300,
+                        mu_e=16.32, mu_h=6.67, eps_r=4.3, eb=0.5, tau_s=80e-15)
+assert len(pc.rows) == 6 and abs(pc.rows[1]["dsigma_Scm"] / (float(ref_["dsigma"]) / 100) - 1) < 1e-9
+assert abs(pc.rows[1]["exponent_k"] - 0.5) < 1e-6 and pc.pulse is not None and "n₀" in pc.text.buf
+pc.tau_t.set("1000"); pc.inten.set("1e-5 1e-4"); pc.field_.set("1e5"); pc.run(); assert pc.rows[1]["exponent_k"] > 0.9
+pc.eb.set(""); pc.et.set("2.35"); pc.eopt.set("1.85"); pc.run(); assert "E_b = 0.500" in pc.text.buf
+pick(tmp / "pc.csv"); pc.export(); assert (tmp / "pc.csv").exists() and (tmp / "pc_pulse.csv").exists()
+pc.eb.set("-0.1")
+try:
+    pc.run(); raise AssertionError("negative E_b accepted")
+except ValueError:
+    pass
+pc.eb.set("0.5")
+check("光电导：从 ceds md 结果读 μ、取极化页 ε、稳态与脉冲、Δσ ∝ I^k 指数、导出")
+
 # ---- 无定形形貌 (GROMACS) → 方法对比
 app.show_page("无定形形貌 (MD)"); mt = app.morph_tab
 mt.gro.set(ROOT / "tests/data/pentacene_300K.gro"); mt.ref.set(ROOT / "tests/data/pentacene_ref.xyz"); mt.frame_.set("1")
@@ -826,10 +851,26 @@ en.show_page("极化位点能")
 em = en.morph_tab; em.gro.set(ROOT / "tests/data/pentacene_300K.gro"); em.ref.set(ROOT / "tests/data/pentacene_ref.xyz")
 em.jm.set(em.JMETH[1]); em.load(); em.energies(); em.lam_h.set("0.092"); em.lam_e.set("0.132"); em.walk.set("60 300"); em.run_kmc()
 ec.src.set(ec.SRC[3]); ec.sig_e.set("0"); ec.run(); en.show_page("无定形形貌 (MD)")
-texts = SHOWN + [en.morph_tab.text.buf, en.pol_tab.text.buf, en.cmp_tab.text.buf, en.logbox.buf, en.reorg_tab.text.buf, en.mob_tab.text.buf, en.ti_tab.text.buf, en.photo_tab.text.buf,
+epc = en.pc_tab; epc.mu_e.set("16.32"); epc.mu_h.set("6.67"); epc.eps.set("4.3"); epc.eb.set("1.5"); epc.tau_s.set("0.08")
+epc.fluence.set("1"); epc.run(); en.show_page("光电导")
+from test_v52 import make_fchks as _mkf
+(tmp / "tvcf").mkdir(exist_ok=True); _mkf(tmp / "tvcf")
+etp = en.photo_tab
+etp.tv_s0.set(tmp / "tvcf/s0.fchk"); etp.tv_s1.set(tmp / "tvcf/s1.fchk"); etp.tv_t1.set(tmp / "tvcf/t1.fchk")
+etp.tv_nac.set(tmp / "tvcf/nac.txt"); etp.tv_fosc.set("0.03"); etp.tv_soc.set("0.6"); etp.tv_soc0.set("0.2")
+etp.tv_temp.set("300"); etp.tvcf_rates(); assert "PLQY" in etp.text.buf and "k_RISC" in etp.text.buf
+check("TVCF 激发态速率 (S0/S1/T1 fchk)")
+en.save_project_file(str(tmp / "gui.mobilis.json"))
+_pj = json.loads((tmp / "gui.mobilis.json").read_text(encoding="utf-8"))
+assert _pj["gui"]["photo_tab.tv_soc"] == "0.6" and len(_pj["gui"]) > 50
+etp.tv_soc.set("9.9"); en.photo_tab.tv_temp.set("77")
+en.open_project_file(str(tmp / "gui.mobilis.json"))
+assert etp.tv_soc.get() == "0.6" and etp.tv_temp.get() == "300"
+check("保存 / 打开项目 (全部界面设置)")
+texts = SHOWN + [en.pc_tab.text.buf, en.morph_tab.text.buf, en.pol_tab.text.buf, en.cmp_tab.text.buf, en.logbox.buf, en.reorg_tab.text.buf, en.mob_tab.text.buf, en.ti_tab.text.buf, en.photo_tab.text.buf,
                  en.decomp_tab.text.buf, es.text.buf]
 import matplotlib.text as _mt
-for tab in (en.mob_tab, en.decomp_tab, en.ti_tab, es, en.pol_tab, en.morph_tab, en.cmp_tab):
+for tab in (en.mob_tab, en.decomp_tab, en.ti_tab, es, en.pol_tab, en.morph_tab, en.cmp_tab, en.pc_tab, en.photo_tab):
     tab.plot.canvas.draw_idle()
     texts += [x.get_text() for x in tab.plot.fig.findobj(_mt.Text)]
 left = sorted({x for x in texts if _re.search(r"[\u4e00-\u9fff]", x) and x != "中文"})

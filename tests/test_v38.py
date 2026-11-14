@@ -1,4 +1,4 @@
-"""v1.25: probabilistic transport-regime assignment (diagnose --uq)."""
+"""v1.25: probabilistic transport-regime assignment (diagnose --uq); deleted scan folders are skipped."""
 import os
 import subprocess
 import sys
@@ -65,6 +65,21 @@ def test_diagnose_uq_and_cli():
                         "--lam-h", "0.187", "--lam-e", "0.255", "--no-phonons", "--uq", "--uq-samples", "2000"],
                        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     assert r.returncode == 0 and "P(hopping)" in r.stdout
+
+
+def test_deleted_scan_folder_is_skipped():
+    import contextlib, io, json, tempfile
+    from pathlib import Path
+    from mobility_tool.scanflow import ScanProject
+    d = Path(tempfile.mkdtemp())
+    (d / "scans" / "ok").mkdir(parents=True)
+    (d / "scans" / "ok" / "scan.json").write_text('{"level": "x"}', encoding="utf-8")
+    (d / "project.json").write_text(json.dumps({"scans": {"ok": {"path": "scans/ok"}, "test_snap": {"path": "scans/test_snap"}}}),
+                                    encoding="utf-8")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert ScanProject(d).scans() == ["ok"]
+    assert "test_snap" in err.getvalue()
 
 
 if __name__ == "__main__":

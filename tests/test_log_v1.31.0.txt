@@ -1,0 +1,67 @@
+ok   test_all.py                 0.2 s
+ok   test_crystal.py             0.3 s
+ok   test_decomposition.py       0.3 s
+ok   test_eht_kmc.py             1.5 s
+ok   test_fcht.py                1.0 s
+ok   test_gui_real.py            0.0 s
+ok   test_photophys.py           0.3 s
+ok   test_v06.py                 1.3 s
+ok   test_v07.py                 0.7 s
+ok   test_v08.py                 1.2 s
+ok   test_v09.py                 1.3 s
+ok   test_v10.py                 0.3 s
+ok   test_v11.py                 0.3 s
+ok   test_v12.py                 0.4 s
+ok   test_v13.py                 0.4 s
+ok   test_v14.py                 2.7 s
+ok   test_v15.py                 1.9 s
+ok   test_v16.py                 3.1 s
+ok   test_v17.py                12.2 s
+ok   test_v18.py                50.7 s
+ok   test_v19.py                24.5 s
+ok   test_v20.py                 2.8 s
+ok   test_v21.py                 4.2 s
+ok   test_v22.py                13.6 s
+ok   test_v23.py                11.2 s
+ok   test_v24.py                 2.5 s
+ok   test_v25.py                10.6 s
+ok   test_v26.py                 1.9 s
+ok   test_v27.py               199.6 s
+ok   test_v28.py                 1.5 s
+ok   test_v29.py                 0.7 s
+ok   test_v30.py                 4.9 s
+ok   test_v31.py                 5.0 s
+ok   test_v32.py               591.1 s
+ok   test_v33.py                 2.2 s
+ok   test_v34.py                 1.8 s
+ok   test_v35.py                20.7 s   (重跑：补上 dp-gen --format 的帮助后通过)
+Traceback (most recent call last):
+  File "/tmp/claude-0/-home-claude/2aa8b6fe-32cc-5f20-b410-f3cbd784360d/scratchpad/mob/Mobilis-1.25.0/tests/test_v35.py", line 68, in <module>
+    test_help_english_and_complete()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/tmp/claude-0/-home-claude/2aa8b6fe-32cc-5f20-b410-f3cbd784360d/scratchpad/mob/Mobilis-1.25.0/tests/test_v35.py", line 48, in test_help_english_and_complete
+    assert not missing, missing
+           ^^^^^^^^^^^
+AssertionError: ['dp-gen format']
+
+ok   test_v36.py                 7.8 s
+ok   test_v37.py                 5.2 s
+ok   test_v38.py                 1.2 s
+ok   test_v39.py                42.6 s
+ok   test_v40.py                33.1 s
+ok   test_v41.py                 1.6 s
+ok   test_v42.py                 1.7 s
+ok   test_v43.py                 5.6 s
+ok   test_v44.py                 0.5 s
+ok   test_v45.py                 3.0 s
+ok   test_v46.py                 9.0 s
+ok   test_v47.py                 1.8 s
+ok   test_v48.py                 1.0 s
+ok   test_v49.py                 0.8 s
+ok   test_v50.py                 5.3 s
+ok   test_v51.py                 3.3 s
+ok   test_v52.py                42.0 s
+ok   test_v53.py                 3.3 s
+ok   test_v54.py                77.0 s
+ok   smoke_gui.py              226.8 s
+EXIT 0

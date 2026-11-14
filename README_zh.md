@@ -19,10 +19,13 @@ Marcus / KMC / 瞬态局域化 (TLT) 迁移率。
 ## 安装与启动
 
 ```bash
-pip install numpy scipy matplotlib
-python run_gui.py            # 图形界面（Windows 下也可双击 Mobilis.bat）
-python -m mobility_tool -h   # 命令行
+pip install mobilis-1.31.0-py3-none-any.whl   # 或在源码文件夹中 pip install . (pip install ".[fast]" 同时安装 numba)
+conda env create -f environment.yml           # conda 环境；packaging/conda/meta.yaml 是 conda-build 配方
+mobilis --version                             # 命令行 (等同 python -m mobility_tool)
+mobilis-gui                                   # 图形界面 (等同 python run_gui.py；Windows 下也可双击 Mobilis.bat)
 ```
+
+分步教程 (含演示文件) 见 [docs/tutorials](docs/tutorials/README.md)。
 
 界面按计算流程组织：主窗口显示结构 (文件 → 打开结构)，模型在“构建”菜单中处理，计算从 **Gaussian → 运行 Gaussian…**、
 **ADF → 运行 ADF…** 和“迁移率”菜单 (软件内计算) 开始，任务在“任务 → 任务管理器”中排队运行，结果在“分析”菜单中读取。
@@ -32,9 +35,102 @@ python -m mobility_tool -h   # 命令行
 直接读取 ADF 的二进制结果文件需要 PLAMS（用 AMS 自带的 `$AMSBIN/amspython run_gui.py` 启动即可，
 或 `pip install plams`）。
 
+## v1.31.0
+- **热振动关联函数 (TVCF) 激发态速率** (`tvcf.py`)：由两个 freq fchk 建立含频率变化与完整 Duschinsky 转动的谐振态；
+  辐射速率与发射光谱 (FC 与 Herzberg–Teller)、内转换 (促进模式，非绝热耦合矢量)、系间窜越与反系间窜越 (旋轨耦合，FC 与
+  旋–振耦合)。命令 `tvcf` (单个过程) 与 `tadf` (S0/S1/T1：k_r、k_IC、k_ISC、k_RISC、T1 衰减，再解 S1/T1 动力学，给出瞬时 /
+  延迟寿命与量子产率)；界面在“激发态/光谱”页。与精确的振动态求和对比 (一维与二维，频率变化、Duschinsky 转动、HT、
+  促进模式；偏差 1e-13 至 3e-5)，并与位移谐振子 FGR 速率和细致平衡对比 (`tests/test_v52.py`)。174 个模式约 2 分钟。
+- **形变势能带迁移率** (`dp.py`)：`dp-gen` 写出应变晶胞 (CIF 或 POSCAR) 与应变表格，`dp` 拟合弹性常数 C 与形变势 E₁，
+  给出 Bardeen–Shockley 迁移率 (三维与二维) 以及晶体紧束缚能带上按形变势弛豫时间的玻尔兹曼输运 (不假设抛物带)；
+  抛物带时玻尔兹曼结果回到 Bardeen–Shockley (`tests/test_v53.py`)。
+- **项目文件** (`*.mobilis.json`，`project.py`)：`project new` (模板 crystal / emitter / deformation)、`project check`
+  (用真实参数解析检查每一步)、`project run` (每步的日志与状态，`--only`、`--start`、`--set`)、`project show`。
+  界面：文件 → 保存项目 / 打开项目，保存全部功能页的设置。
+- **分步教程**：`docs/tutorials` 中 6 篇教程，演示文件在 `examples/` (`tests/test_v54.py` 检查每条教程命令的参数，并运行
+  使用演示文件的命令)。
+- **pip / conda 安装**：wheel 含数据文件 (此前包中缺少原子密度文件)，入口 `mobilis` 与 `mobilis-gui`，可选依赖 `[fast]`、
+  `[md]`、`[all]`；`environment.yml` 与 conda-build 配方。
+
+## v1.30.0
+- **量子核隧穿 (费米黄金规则，全部振动模式)**：新模块 `tunneling.py`，跳跃速率 k = |V|²/ħ² ∫ dt exp[iΔG t/ħ − G(t)]，
+  使用两种电荷态全部分子内模式的黄昆因子 (`reorg-decomp` 输出的两个 `*_modes.csv`)，可加经典部分 (外重组能，或
+  `--classical-below` 以下的低频模式)。全部模式取经典时回到 Marcus，单个高频模式时回到 Marcus–Levich–Jortner
+  (误差均 < 0.2 %，`tests/test_v51.py`)。
+- 新命令 `tunneling --modes X_neutral_modes.csv X_ion_modes.csv --cif X.cif --temps 100,200,300`：各温度下
+  k_FGR/k_Marcus、k_MLJ/k_Marcus 与零场迁移率 (解析张量，加 `--kmc` 同时跑 KMC)，写入 CSV。`kmc --rate fgr --modes …`
+  在晶体图 KMC 中使用同样的速率 (可加电场与能量无序)。
+- 界面的"方法比较"页与 `compare_methods` 可加入"FGR 张量"与"KMC (FGR)"两行 (勾选"加入量子核隧穿")，模式取自分解页。
+
+## v1.29.1
+- **一次运行只用一种语言**：中文界面下，原来以英文写的提示与帮助改为中文显示；英文界面下，剩余的中文提示也已翻译
+  (新增约 400 条，`_cli_i18n_more.py`，包括 argparse 自身的提示、`diagnose` 与逐帧 TLT 的报告)。`tests/test_v50.py`
+  在两种语言下检查代码中的全部提示与帮助，并实际运行 `diagnose` 和两个帮助页面；新加的提示若没有翻译，测试会失败。
+- 程序退出时关闭 EHT 工作进程 (Windows 下不再出现 "Exception ignored ... weakref_cb")。
+
+## v1.29.0
+- **ORCA 与 xtb 计算层级**：扫描与主动学习可用 ORCA (任意泛函与基组，`scan level --engine orca --method "B3LYP D3BJ"
+  --qc-basis def2-SVP`，学术免费) 或 xtb (GFN1/GFN2，每个二聚体数秒) 计算耦合。单体 A 只算一次 (`run_mono.sh` / `.bat`
+  → `mono.molden.input`)，每个二聚体算 B 与 AB；耦合由 Molden 文件 (`orca_2mkl -molden`、`xtb --molden`) 的二聚体投影得到，
+  B 的轨道相位按 p 系数与参考单体对齐，整个扫描中 V 的符号一致 (与 ADF 冻结片段相同)。生成 bash 与 Windows 批处理；
+  预检查、收集、曲面拟合与 `ceds al` 用法与 ADF 层级相同。程序不在 PATH 中时用环境变量 `ORCA_EXE` / `XTB_EXE` 指定。
+- **numba 加速 EHT 基线** (可选，`pip install numba`)：分子间重叠块改为编译的循环并筛除可忽略的高斯原函数对，
+  结果与原来一致到机器精度；未安装 numba 时仍用 numpy。`python tools_bench_eht.py 晶体.cif` 可在本机比较两者速度。
+
+## v1.28.3
+- **并行 EHT 修正线程过载**：工作进程改为每个只用 1 个 BLAS/LAPACK 线程。此前每个工作进程默认开与核数相同的 BLAS 线程
+  (MKL / OpenBLAS)，J 个进程同时运行时机器上有 J × J 个线程，并行 EHT 可能比单进程还慢 (红荧烯 MD 耦合统计由
+  几十分钟拖到几小时)。5 万个构型以上的批量计算报告进度。数值不变。
+
+## v1.28.2
+- **MD 耦合统计显示进度**：`ceds md` 跑完 MD 后，逐个二聚体报告构型数；构型数 ≥ 2 万时报告进度与剩余时间
+  (Δ-GP 曲面的每个构型都要算 EHT 基线：红荧烯 1×12×8 超胞每个二聚体 1.4×10^5 个构型)。数值不变。
+- **轨迹自动保存与重用**：轨迹默认连同设置 (温度、超胞、MD 参数、力场、电荷、晶格) 保存到当前文件夹的
+  `md_traj_<cif>_<超胞>`，再次运行同样的计算时直接读取，不再重跑 MD。`--rerun-md` 强制重跑，`--no-save-traj` 不保存，
+  `--save-traj DIR` 指定文件夹。
+
+## v1.28.1
+- **逐帧 TLT 提速**：耦合统计 (高斯与 MD 分布抽样、形状、相关) 用约 300 帧 (`--frame-stride K` 指定每 K 帧取 1 帧；30 ps、20 fs 一帧时 K = 5)，
+  逐帧哈密顿量仍是同样的 N 帧；每算完一条键报告进度与剩余时间。
+- **EHT 基线并行**：Δ-GP 曲面的 EHT 基线在大批量计算 (MD 耦合、逐帧 TLT) 时用多进程 (`--jobs N`，默认全部 CPU 核)。
+  红荧烯 1×12×8 超胞的逐帧 TLT 一步由约 13 h 降到 8 核 1 h 以内。
+
+## v1.28.0
+- **激子输运 `exciton`**：跃迁电荷由内置 INDO/S–CIS 计算或读取 Gaussian TD-DFT 输出 (`--charges log`，`--write-gjf` 写输入)；
+  晶体中全部近邻对的 TrESP 激子耦合 (光学屏蔽 f = 1/n²)、k = 0 Davydov 劈裂、Marcus 激子跳跃速率 (`--lambda`)、扩散张量、
+  扩散长度 L = (2Dτ)^1/2 (`--tau`) 与 KMC 检验 (`--kmc`)。`--md-ps` 另做刚体 MD，给出激子耦合的热统计 ⟨V⟩、σ_V。
+- **区间校准检查 `ceds al --al-calib-report`**：只报告，不写新一轮。每个近邻对给出两种载流子的 c_LOO、标准化留一残差落在 ±1.96 内的比例，
+  以及 c = 1.5、2.0、2.5 与 c_LOO 下 σ_V 的 95% 半宽；写出 `<名称>_calib_report.json`。
+- **`ceds md` 晶格稳定性检查**：每个温度检查 U_eq 与 CIF 晶体学值之比 (> 2 倍警告)、采样段后半段与前半段 U_eq 之比 (> 1.3)、
+  首末四分之一段分子质心的偏移 (> 0.5 Å)，多个温度时检查 U_eq/T 相对最低温度 (> 1.5 倍；简谐晶格 U_eq ∝ T)。
+  失稳的温度在汇总与 CSV (`U_eq_growth`、`drift_max_A`、`lattice_stable`) 中标出。
+
+## v1.27.0
+- **光电导 `photocond`**：计算光照下的光生载流子与光电导。输入激光波长、吸收系数、膜厚与反射率、光强 (可给多个值，W cm⁻²) 或脉冲能量密度、
+  电场、温度、电子与空穴迁移率 (直接给出，或从 `ceds md` 结果按温度读取)、介电常数、激子结合能 (`--eb`，或 `--et` 与 `--eopt`) 和单重态激子寿命。
+  对每个光强与电场输出：激子产生率、自由载流子产率 η (Onsager–Braun 解离与激子衰减 (如单重态裂分) 竞争)、自由载流子产生率 G = η g、
+  稳态浓度 n (Langevin 复合，`--zeta` 为缩减因子；`--tau-trap` 加陷阱复合)、载流子寿命、Δσ = e n (μe + μh) 和光电流密度。
+  给出多个光强时打印 Δσ ∝ I^k 的局部指数 k (0.5：Langevin 双分子复合；1：单分子复合)。`--fluence` 另给出短脉冲后 Δσ 的衰减。
+  图形界面新增“光电导”页（迁移率菜单）：迁移率可手动填写或从 `ceds md` 结果读取，ε 可取极化位点能页的值；结果表含指数 k，
+  并绘出 Δσ–光强、η–电场与脉冲后 Δσ(t) 三图，可导出 CSV 与 PNG。
+- **区间校准 `ceds al --al-calib loo`**：每个近邻对的校准因子由其 DFT 点的留一法标准化残差给出 (同一点的全部对称像一起留出；固定超参数、
+  重新估计基线系数的解析式)。默认仍为固定因子 c = 2.0；两种方式下结果表都列出各对的 c_LOO。
+- `ceds md`：每个温度的 MD 每完成 5% 的步数报告一次进度、已用时间与预计剩余时间。
+
+## v1.26.0
+- **逐帧 TLT `ceds md --frame-tlt [N]`**：在 MD 超胞上用 N 个 MD 帧 (默认 24) 的哈密顿量计算瞬态局域化迁移率，
+  并在同一格子上与两种独立抽样比较：每条键按 N(⟨V⟩, σ_V) 抽样 (通常的 TLT)，以及按该类键的 MD 实际分布抽样。
+  三者之差把高斯近似的误差分成"分布形状"与"键间相关"两部分。输出每类键耦合的偏度、峰度，以及共用一个分子的两条键之间的耦合相关系数，
+  表格写入 `<out>_frames.csv`。超胞在两个传输方向上至少 8 个晶胞 (建议 12–16，例如 `--supercell 12,12,2`)；含对映异构分子的晶体不适用。
+- **耦合曲面数据库 `db add / list / export`**：每个晶体一个文件夹，存放算完的 DFT 二聚体 (`dimers.csv`，列与 `all_results.csv` 相同，含能量分解)、
+  坐标 (`structures.xyz`) 和 `record.json` (分子式、点群、晶胞、空间群、CCDC 编号、计算级别、主动学习轮数与各对 DFT 点数、重组能、
+  MD 统计、μ(T)、快照检验)。`--no-cif` 只记录晶胞与编号、不复制结构文件；`db export` 把所有晶体的二聚体合并成一张表，供训练模型使用。
+- 刚体 MD：邻接表先按分子质心距离筛选 (分子对列表不变，大超胞构建快得多)。
+
 ## v1.25.0
 - `diagnose --uq`：以概率给出输运区。最大耦合按四晶体基准中 EHT×k 相对 B3LYP 二聚体投影的误差抽样，λ 与声子 σ_J/|J|
   取对数正态分布；输出 P(跳跃)、P(瞬态局域)、P(类能带)、2|J|/λ 的 90 % 区间以及决定不确定度的输入 (`--lam-rel`、`--uq-samples`、`--seed`)。
+- 扫描项目：手动删除的扫描文件夹会被跳过并给出警告，`ceds` 不再因此中断。
 
 ## v1.24.0
 - **命令行默认英文**：全部子命令的帮助与输出信息改为英文 (投稿 Computer Physics Communications 时审稿人需要运行程序)；

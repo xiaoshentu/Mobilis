@@ -79,7 +79,7 @@ def test_calibration_errors_and_csv():
                         "--calibrate-csv", p, "--site-energy", "none", "--quiet"],
                        cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace", env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}, text=True, timeout=600)
     assert r.returncode == 0, r.stderr
-    assert "k = 3.000" in r.stdout and "k = 1.500" in r.stdout and "DFT 校准" in r.stdout
+    assert "k = 3.000" in r.stdout and "k = 1.500" in r.stdout and ("DFT 校准" in r.stdout or "DFT calibration" in r.stdout)
     out = os.path.join(d, "cal")
     r = subprocess.run([sys.executable, "-m", "mobility_tool", "morph", "--gro", GRO, "--monomer", REF,
                         "--export-dimers", out, "--calib-pairs", "6", "--site-energy", "none", "--quiet"],
