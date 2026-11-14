@@ -1,0 +1,17 @@
+numpy>=1.20
+scipy>=1.7
+matplotlib>=3.5
+scikit-image>=0.19
+
+[adf]
+plams
+
+[all]
+numba>=0.57
+MDAnalysis>=2.0
+
+[fast]
+numba>=0.57
+
+[md]
+MDAnalysis>=2.0

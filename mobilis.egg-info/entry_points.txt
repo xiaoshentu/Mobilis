@@ -1,0 +1,5 @@
+[console_scripts]
+mobilis = mobility_tool.cli:main
+
+[gui_scripts]
+mobilis-gui = mobility_tool.gui:main

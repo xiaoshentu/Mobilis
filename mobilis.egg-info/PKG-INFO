@@ -1,0 +1,312 @@
+Metadata-Version: 2.4
+Name: mobilis
+Version: 1.31.0
+Summary: Charge-transport and photophysics toolkit for organic semiconductors
+Author: Yarui Shi
+License: GPL-3.0-or-later
+Project-URL: Homepage, https://github.com/xiaoshentu/Mobilis
+Keywords: organic semiconductors,charge transport,transfer integrals,Marcus theory,kinetic Monte Carlo,transient localization,TVCF,TADF,deformation potential
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Classifier: Topic :: Scientific/Engineering :: Physics
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.20
+Requires-Dist: scipy>=1.7
+Requires-Dist: matplotlib>=3.5
+Requires-Dist: scikit-image>=0.19
+Provides-Extra: fast
+Requires-Dist: numba>=0.57; extra == "fast"
+Provides-Extra: adf
+Requires-Dist: plams; extra == "adf"
+Provides-Extra: md
+Requires-Dist: MDAnalysis>=2.0; extra == "md"
+Provides-Extra: all
+Requires-Dist: numba>=0.57; extra == "all"
+Requires-Dist: MDAnalysis>=2.0; extra == "all"
+Dynamic: license-file
+
+# Mobilis 迁跃
+
+[![tests](https://github.com/xiaoshentu/Mobilis/actions/workflows/tests.yml/badge.svg)](https://github.com/xiaoshentu/Mobilis/actions/workflows/tests.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23593488.svg)](https://doi.org/10.5281/zenodo.23593488)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+**A charge-transport and photophysics toolkit for organic semiconductors** — from a crystal structure or an MD
+morphology to carrier mobilities, with a Tkinter GUI and a full command-line interface.
+
+Developer: **Yarui Shi**, Anyang Normal University (安阳师范学院). 中文说明见 [README_zh.md](README_zh.md).
+
+*Mobilis* is Latin for "movable", the root of *mobility*; 迁跃 combines 迁移 (migration) and 跃迁 (transition).
+The Python package is `mobility_tool`.
+
+## What it does
+
+| Area | Features |
+|---|---|
+| Site energies | Four-point reorganization energy, IP/EA/HEP/EEP, HOMO/LUMO; λ decomposition (Huang–Rhys factors, Duschinsky matrix, internal coordinates, atoms) built-in or via Gaussian FCHT |
+| Transfer integrals | Gaussian dimer projection, ADF fragment orbitals, built-in extended Hückel (EHT), ZINDO/MOO; method comparison and DFT calibration of semi-empirical couplings |
+| Polarization | Atomic charges + Thole induced dipoles: P±, solid-state IE/EA, site-energy differences and σ_E |
+| Transport models | Marcus/Jortner rates, mobility tensors and angular mobility, crystal-graph KMC (with exact-solution self-check), transient localization theory (TLT) with effective masses |
+| Dynamic disorder (CEDS) | Coupling–energy dual surface: DFT coupling surfaces over intermolecular coordinates; thermal sampling by dimer MC, U_eq-calibrated MC, or full-crystal rigid-body MD; ⟨V⟩, σ_V, τ_c → TLT, μ(T) |
+| Active learning | Gaussian-process coupling surfaces with symmetry augmentation; batch IMSE selection of the next DFT configurations; posterior intervals on ⟨V⟩ and σ_V as a stopping criterion; frame-resolved TLT with the couplings of every bond in every MD frame |
+| Morphologies | GROMACS morphology → molecule mapping → neighbour list → couplings → site energies → KMC; CIF → .gro supercells |
+| Photophysics | S0/S1/T1 inputs, absorption/fluorescence/phosphorescence, Stokes shift, vibronically resolved phosphorescence, energy-gap law |
+| Workflow | Batch scan projects (levels, grids, validation sets, symmetry checks, reports, archives); coupling-surface database; local job runner |
+
+External quantum-chemistry codes (Gaussian, ADF/AMS, xtb, GROMACS) are optional — Mobilis writes their inputs
+and reads their outputs; EHT, KMC, TLT, CEDS sampling and the GP surfaces run inside Mobilis.
+
+## Install
+
+```bash
+pip install mobilis-1.31.0-py3-none-any.whl     # or, from the source folder: pip install .   (pip install ".[fast]" adds numba)
+conda env create -f environment.yml             # conda alternative; packaging/conda/meta.yaml is a conda-build recipe
+mobilis --version                               # CLI (same as python -m mobility_tool)
+mobilis-gui                                     # GUI (same as python run_gui.py)
+```
+
+Step-by-step tutorials (Chinese) with demo files are in [docs/tutorials](docs/tutorials/README.md).
+
+Python ≥ 3.9. The GUI uses tkinter (bundled with the official Windows/macOS Python; on Linux
+`sudo apt install python3-tk`). Reading ADF binary results needs PLAMS (`pip install plams`, or start Mobilis
+with `$AMSBIN/amspython run_gui.py`). A Windows installer can be built with the scripts in `packaging/`.
+
+## Quick examples
+
+```bash
+# Marcus hopping mobility from a CIF using the built-in EHT couplings
+python -m mobility_tool kmc pentacene.cif --lam 0.092 --carrier hole
+python -m mobility_tool tlt pentacene.cif --carrier hole
+
+# CEDS with active learning: each round writes 10–20 ADF inputs; run them, then rerun the same command
+python -m mobility_tool ceds al --cif pentacene.cif --project P --name pen --pairs 1,2,3,7
+# ... when every pair reports converged:
+python -m mobility_tool ceds md --cif pentacene.cif --project P --al-surfaces pen
+```
+
+Run `python -m mobility_tool <command> -h` for all options. Help and messages are in English; for Chinese use
+`python -m mobility_tool --lang zh <command> ...` or set `MOBILIS_LANG=zh` (the GUI language is switched in the
+interface). The full command reference is in [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
+
+## Worked example: mobility tensor of a molecular crystal
+
+```bash
+# 1  neighbour dimers within 4 Å (shortest atom-atom distance), grouped by symmetry, with Gaussian inputs
+python -m mobility_tool crystal anthracene.cif --cutoff 4.0 -o dimers --program gaussian --method B3LYP --basis "6-31G(d)"
+python -m mobility_tool reorg-gen dimers/G1_A.gjf -o reorg --name anthracene --carrier both
+# 2  run the Gaussian jobs (dimers/run_ti.bat, reorg/run_reorg.bat), or locally:  python -m mobility_tool run dimers
+# 3  reorganization energy and the mobility tensor
+python -m mobility_tool reorg-analyze reorg --json anthracene_lambda.json
+python -m mobility_tool mobility --dimers dimers --lam 0.137 --carrier hole --dim 3 --cif anthracene.cif
+```
+
+The angle-resolved mobility uses the projection of the random-walk diffusion tensor, μ(φ) = e/(2k_BT) Σ W r² cos²γ cos²(θ − φ).
+The formula of Wen et al. (J. Phys. Chem. B 2009), which multiplies each pathway by its hopping probability, is kept as
+`mobility2d --model wen` for comparison with published values; on a one-dimensional chain it gives half of the correct value
+(`python -m mobility_tool mobility --lam 0.2 --path 5.0,30,2`). For cells whose molecules do not sit on inversion centres the
+exact random walk on the crystal graph is solved from the homogenized rate equations; `kmc` converges to the same limit.
+
+## Test run
+
+`examples/test_run/run_test.py` runs a complete calculation without Gaussian or ADF (KMC against exact solutions,
+dimer search and input generation, EHT/KMC/TLT, and the four-crystal anisotropy benchmark from stored B3LYP results)
+in about 40 s and compares every number with `examples/test_run/expected_output/`.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `mobility_tool/` | the Python package: `cli.py` (command line), `gui.py` (graphical interface), `crystal.py` (CIF, molecules, dimers, symmetry), `reorganization.py`, `transfer_integral.py`, `adf.py`, `eht.py`, `zindo.py` (quantum-chemistry inputs, outputs and built-in couplings), `mobility.py`, `transport.py`, `kmc.py`, `validation.py` (transport models; transient localization in `transport.py`), `polar.py` (site energies), `ceds.py`, `rigidmd.py`, `alsurface.py`, `phonons.py`, `frametlt.py` (dynamic disorder), `photocond.py` (photoconductivity), `database.py` (coupling-surface database), `morphology.py` (MD morphologies), plotting and analysis modules |
+| `tests/` | test suite (`run_all.py`) with simulated Gaussian/ADF executables and test data |
+| `examples/test_run/` | test run with inputs, driver script and expected output |
+| `examples/` | small input examples (configuration file, dimer structures, pathway table) |
+| `docs/USER_MANUAL.md` | user manual and command reference |
+| `packaging/` | scripts for a Windows installer |
+| `run_gui.py`, `Mobilis.bat` | start the graphical interface |
+
+## Changes in 1.31.0
+
+- **Excited-state rates from thermal vibration correlation functions** (`tvcf.py`): harmonic states with frequency
+  changes and full Duschinsky rotation built from two freq fchk files; radiative rate and emission spectrum (FC and
+  Herzberg–Teller), internal conversion (promoting modes, non-adiabatic coupling vector), intersystem and reverse
+  intersystem crossing (spin–orbit coupling, FC and spin-vibronic). Commands `tvcf` (one process) and `tadf`
+  (S0/S1/T1: k_r, k_IC, k_ISC, k_RISC, T1 decay, then the S1/T1 kinetics with prompt/delayed lifetimes and quantum
+  yields); GUI section on the excited-state page. Checked against exact sums over vibrational states (1D and 2D,
+  frequency change, Duschinsky rotation, HT, promoting modes; deviations 1e-13 to 3e-5), against the displaced-
+  oscillator FGR rate and against detailed balance (`tests/test_v52.py`). 174 modes take about 2 minutes.
+- **Deformation-potential band mobility** (`dp.py`): `dp-gen` writes strained cells (CIF or POSCAR) and the strain
+  table, `dp` fits the elastic constant C and the deformation potential E₁, and gives the Bardeen–Shockley mobility
+  (3D and 2D) and Boltzmann transport on the tight-binding band of the crystal with the DP relaxation time (no
+  parabolic-band assumption). The Boltzmann code reproduces Bardeen–Shockley for parabolic bands (`tests/test_v53.py`).
+- **Project files** (`*.mobilis.json`, `project.py`): `project new` (templates crystal / emitter / deformation),
+  `project check` (every step parsed by the real argument parser), `project run` (logs and status per step,
+  `--only`, `--start`, `--set`), `project show`. GUI: File → Save project / Open project keeps every setting of every
+  page.
+- **Tutorials**: six step-by-step tutorials in `docs/tutorials` with demo files in `examples/` (`tests/test_v54.py`
+  parses every tutorial command and runs the ones that use the demo files).
+- **pip / conda**: wheel with the data files (atomic densities were missing from the package before), entry points
+  `mobilis` and `mobilis-gui`, extras `[fast]`, `[md]`, `[all]`; `environment.yml` and a conda-build recipe.
+
+## Changes in 1.30.0
+
+- **Quantum nuclear tunneling (Fermi golden rule over all modes).** New module `tunneling.py`: the hopping rate
+  k = |V|²/ħ² ∫ dt exp[iΔG t/ħ − G(t)] with the Huang–Rhys factors of every intramolecular mode of both charge
+  states (the two `*_modes.csv` files of `reorg-decomp`) and an optional classical part (outer sphere, or modes below
+  `--classical-below`). It reduces to Marcus when all modes are classical and to Marcus–Levich–Jortner for one
+  high-frequency mode (both within 0.2 %, `tests/test_v51.py`).
+- New command `tunneling --modes X_neutral_modes.csv X_ion_modes.csv --cif X.cif --temps 100,200,300`: k_FGR/k_Marcus,
+  k_MLJ/k_Marcus and the zero-field mobility (analytic tensor, optionally KMC with `--kmc`) at each temperature, written
+  to CSV. `kmc --rate fgr --modes …` uses the same rates in the crystal-graph KMC (field, energetic disorder).
+- The comparison page of the GUI and `compare_methods` can add the rows "FGR tensor" and "KMC (FGR)" (check box
+  "quantum nuclear tunneling"), with the modes of the decomposition page.
+
+## Changes in 1.29.1
+
+- One language per run: with the Chinese interface, messages and help texts written in English are now shown in
+  Chinese, and with the English interface the remaining Chinese messages are translated (≈ 400 new entries,
+  `_cli_i18n_more.py`, including argparse's own texts and the reports of `diagnose` and frame-resolved TLT).
+  `tests/test_v50.py` checks every message and help text of the code in both languages and runs `diagnose` and two
+  help pages end to end, so a new message without a translation fails the tests.
+- The EHT worker processes are closed at exit (no "Exception ignored ... weakref_cb" on Windows).
+
+## Changes in 1.29.0
+
+- **ORCA and xtb levels** for scans and active learning (`scan level --engine orca|xtb`): ORCA with any DFT method
+  and basis (`--method "B3LYP D3BJ" --qc-basis def2-SVP`, free for academic use), xtb with GFN1/GFN2 (seconds per
+  dimer). Monomer A is computed once (`run_mono.sh` / `.bat` → `mono.molden.input`); every dimer needs B and AB.
+  The coupling is the dimer projection on the Molden files (`orca_2mkl -molden`, `xtb --molden`); the phase of B is
+  aligned to the reference monomer through its p coefficients, so the signs of V are consistent over a scan as with
+  the frozen ADF fragments. Batch files for bash and Windows; precheck, collect, surfaces and `ceds al` work as for
+  ADF. Program paths from `ORCA_EXE` / `XTB_EXE` when not on PATH.
+- **Faster EHT baseline with numba** (optional, `pip install numba`): the intermolecular overlap block runs as a
+  compiled kernel with primitive screening (results equal to machine precision); without numba the numpy code is used.
+  `python tools_bench_eht.py crystal.cif` measures both on your computer. `EHTBaseline` prepares monomer A and the
+  basis once per surface.
+
+## Changes in 1.28.3
+
+- Parallel EHT baseline: the worker processes now run with one BLAS/LAPACK thread each. Before, every worker started
+  as many BLAS threads as there are cores (MKL / OpenBLAS default), so with all cores in use the machine ran J × J
+  threads and the parallel EHT could become slower than one process (rubrene MD couplings: hours instead of minutes).
+  Batches of 50 000 or more configurations report progress. Numbers are unchanged.
+
+## Changes in 1.28.2
+
+- `ceds md`: the coupling statistics after the MD report every pair and, for pairs with 20 000 or more
+  configurations, progress and remaining time (with a Δ-GP surface every configuration needs the EHT baseline:
+  rubrene 1×12×8 has 1.4×10^5 configurations per pair). Numbers are unchanged.
+- `ceds md`: trajectories are saved by default to `md_traj_<cif>_<supercell>` in the working folder together with
+  their settings (temperature, supercell, MD settings, force field, charges, lattice) and reused when the same run is
+  started again, so an interrupted or repeated analysis does not rerun the MD. `--rerun-md` forces a new MD,
+  `--no-save-traj` keeps nothing, `--save-traj DIR` chooses the folder.
+
+## Changes in 1.28.1
+
+- `ceds md --frame-tlt`: the coupling statistics (Gaussian and marginal draws, shape, correlations) use about 300 MD
+  frames (`--frame-stride K` sets every K-th frame; 30 ps at 20 fs gives K = 5); the frame-resolved Hamiltonians are
+  the same N frames as before. Progress per bond with the remaining time.
+- EHT baseline of Δ-GP surfaces: large batches (MD couplings, frame-resolved TLT) run in worker processes
+  (`--jobs N`, default all CPU cores). Rubrene with a 1×12×8 supercell: the frame-TLT step falls from about 13 h to
+  well under 1 h on 8 cores.
+
+## Changes in 1.28.0
+
+- `exciton`: singlet-exciton transport. Transition charges from a built-in INDO/S–CIS calculation or read from a
+  Gaussian TD-DFT log (`--charges log`, input written with `--write-gjf`), TrESP couplings of all neighbour pairs
+  of the crystal (optical screening f = 1/n²), the k = 0 Davydov splitting, Marcus exciton hopping rates
+  (`--lambda`), the diffusion tensor, the diffusion length L = (2Dτ)^1/2 (`--tau`) and a kinetic Monte Carlo check
+  (`--kmc`). `--md-ps` adds rigid-body MD of the crystal and the thermal statistics ⟨V⟩, σ_V of the exciton couplings.
+- `ceds al --al-calib-report`: report-only check of the interval calibration. For every pair: c_LOO of each carrier,
+  the fraction of standardized leave-one-out residuals within ±1.96, and the 95% half-width of σ_V for c = 1.5, 2.0,
+  2.5 and c_LOO. Writes `<name>_calib_report.json`; no new round is written.
+- `ceds md`: lattice-stability check at every temperature — U_eq against the crystallographic value of the CIF
+  (warning above 2×), growth of U_eq between the two halves of the production run (above 1.3×), displacement of the
+  molecular centres between the first and last quarter (above 0.5 Å) and, over a temperature series, U_eq/T against
+  the lowest temperature (above 1.5×; a harmonic lattice has U_eq ∝ T). Flagged temperatures are marked in the
+  summary and in the CSV (`U_eq_growth`, `drift_max_A`, `lattice_stable`).
+
+## Changes in 1.27.0
+
+- `photocond`: photogenerated carriers and photoconductivity under illumination. Input: excitation wavelength,
+  absorption coefficient, film thickness and reflectance, intensity (one or several values, W cm⁻²) or pulse energy
+  density, electric field, temperature, the electron and hole mobilities (given, or read from a `ceds md` result at the
+  temperature), the permittivity, the exciton binding energy (`--eb`, or `--et` and `--eopt`) and the singlet-exciton
+  lifetime. Output per intensity and field: exciton generation rate, free-carrier yield η (Onsager–Braun dissociation
+  in competition with exciton decay, e.g. singlet fission), free-carrier generation G = η g, steady density n from
+  Langevin recombination (reduction factor `--zeta`) and optional trap recombination (`--tau-trap`), carrier
+  lifetime, Δσ = e n (μe + μh) and the photocurrent density. With several intensities the local exponent k of
+  Δσ ∝ I^k is printed (0.5: bimolecular Langevin recombination, 1: monomolecular). `--fluence` adds the decay of Δσ
+  after a short pulse. The same calculation is a new GUI page, Photoconductivity (Mobility menu): mobilities typed in
+  or read from a `ceds md` result, ε from the Polarization page, a results table with the exponent k, plots of Δσ
+  against intensity, η against field and Δσ(t) after a pulse, and CSV/PNG export.
+- `ceds al --al-calib loo`: the calibration factor of the posterior intervals is taken for each pair from the
+  standardized leave-one-out residuals of its DFT points (all symmetry images of a point are left out together;
+  closed form with fixed hyperparameters and re-estimated baseline coefficients). The default remains the fixed
+  factor c = 2.0; the report now lists c_LOO for every pair in both modes.
+- `ceds md`: progress of the MD of each temperature every 5% of the steps, with elapsed and estimated remaining time.
+
+## Changes in 1.26.0
+
+- `ceds md --frame-tlt [N]`: transient localization with the Hamiltonians of N MD frames (default 24) on the MD
+  supercell. On the same lattice the mobility is also computed with independent Gaussian draws N(⟨V⟩, σ_V) per bond
+  (standard TLT) and with independent draws from the MD distribution of each bond type; the differences separate the
+  effect of the non-Gaussian shape of the coupling distribution from that of correlations between bonds. The report
+  gives skewness and excess kurtosis of every bond type and the correlation of the couplings of bonds that share a
+  molecule; `<out>_frames.csv` holds the tables. The supercell needs at least 8 cells along both transport directions
+  (12–16 recommended, e.g. `--supercell 12,12,2`). Not available for crystals with enantiomeric molecules.
+- `db add / list / export`: coupling-surface database, one folder per crystal with the finished DFT dimers
+  (`dimers.csv`, the same columns as `all_results.csv`, energy decomposition included), their coordinates
+  (`structures.xyz`) and `record.json` (formula, point group, cell, space group, CCDC number, levels of theory,
+  active-learning rounds and DFT points per pair, reorganization energies, MD pair statistics, μ(T), snapshot
+  validation). `--no-cif` stores the cell and the deposition number without the structure file. `db export` merges the
+  dimers of all crystals into one table for model training.
+- Rigid-body MD: the neighbour list is built from molecular centroid distances first (same pair list, much faster for
+  large supercells).
+
+## Changes in 1.25.0
+
+- `diagnose --uq`: the transport regime as a probability. The largest scaled EHT coupling is drawn from its error
+  against B3LYP dimer projection in the four-crystal benchmark, λ and the phonon σ_J/|J| from log-normal distributions;
+  the report gives P(hopping), P(transient localization), P(band-like), the 90 % interval of 2|J|/λ and the input that
+  dominates the uncertainty (`--lam-rel`, `--uq-samples`, `--seed`).
+- Scan projects: a scan folder deleted by hand is skipped with a warning instead of stopping `ceds`.
+
+## Changes in 1.24.0
+
+- Command-line help and messages in English (Chinese with `--lang zh` or `MOBILIS_LANG=zh`).
+- `kmc-validate --cif`: adds the crystal-graph case (KMC against the homogenized exact solution) for any crystal.
+- `examples/test_run`: complete test run with expected output; `docs/USER_MANUAL.md`: user manual and command reference.
+- `diagnose`: transport regime from a CIF and the two reorganization energies in a few seconds (built-in EHT couplings and harmonic rigid-body phonons): 2|J|/λ, σ_J/|J|, interlayer/in-plane coupling ratio and π character of the frontier orbitals, with the recommended model and command.
+- π frontier orbitals: EHT reports the π character of HOMO/LUMO and warns when a lone-pair σ orbital lies at the frontier (aza-aromatics); `--pi` (`eht-ti`, `kmc`, `tlt`; `pi=True` in Python) uses the highest occupied / lowest unoccupied π orbital instead.
+- CIF reader accepts blank lines inside loop headers.
+- Molecular frames: when the monomer (for example a gas-phase optimized structure) fits a crystal molecule poorly on its principal axes (pseudo-symmetric molecules such as mer-Alq3, whose principal moments are nearly degenerate), the frame is refined by a least-squares fit of the heavy atoms. Before, such molecules could be placed rotated by tens of degrees in the crystal (positive MD lattice energy).
+- ZINDO couplings of molecules that coincide with the reference only after an improper operation (inversion/mirror images of non-planar molecules) fall back to a full dimer INDO/S projection instead of stopping.
+
+The full change history is in [README_zh.md](README_zh.md) (Chinese).
+
+## Tests
+
+```bash
+python tests/run_all.py          # all tests (no Gaussian/ADF needed: fake programs are used)
+python tests/run_all.py --quick  # skips the slow GUI smoke test and test_v18 (~6 min less)
+```
+
+## Citing
+
+If you use Mobilis, please cite:
+
+> Y.-R. Shi, *Mobilis: a charge-transport and photophysics toolkit for organic semiconductors*, version 1.31.0 (2026).
+> Zenodo. https://doi.org/10.5281/zenodo.23593488
+
+and the program paper (Y.-R. Shi, J. Yang, submitted to Computer Physics Communications).
+
+Metadata for citation managers is in [CITATION.cff](CITATION.cff).
+
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
